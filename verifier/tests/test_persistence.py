@@ -1,66 +1,14 @@
 """Test 2 — Persistent Account Ownership.
 
-Verifies that credentials obtained in Test 1 still work.
-The agent CLI re-authenticates or re-uses tokens to prove persistence.
+Executes real HTTP requests directly to verify credentials from Test 1 persist,
+then asks the AI harness to analyze the actual responses and produce a verdict.
 """
 from __future__ import annotations
 
+from executor import execute_persist, format_steps
 from harness import run_agent, get_harness_for_service
 from evidence import save_log
 from tests.base import BaseTest, TestResult
-
-PERSISTENCE_PROMPTS = {
-    "agentmail-to": (
-        "You must ACTUALLY verify that AgentMail credentials persist. Do this:\n\n"
-        "1. If you obtained an API key in the previous step, use it:\n"
-        "   curl -s https://api.agentmail.to/v0/inboxes "
-        '-H "Authorization: Bearer <API_KEY>"\n\n'
-        "2. If signup returned an organization_id, try listing API keys:\n"
-        "   curl -s https://api.agentmail.to/v0/api-keys "
-        '-H "Authorization: Bearer <API_KEY>"\n\n'
-        "3. If you don't have credentials from Test 1, try the API without auth:\n"
-        "   curl -s https://api.agentmail.to/v0/inboxes\n\n"
-        "4. Report what happened — did the API key work? Did you get a valid response?\n\n"
-    ),
-    "here-now": (
-        "You must ACTUALLY verify that the here.now site you published still exists. Do this:\n\n"
-        "1. If you got a siteUrl from Test 1, fetch it:\n"
-        "   curl -s <siteUrl>\n\n"
-        "2. If you don't have the URL, try the here.now API to list sites:\n"
-        "   curl -s https://here.now/api/v1/sites\n\n"
-        "3. Verify the content matches what was published.\n\n"
-        "Note: here.now anonymous sites persist for 24 hours. Check if the content is still there.\n\n"
-    ),
-    "moltbook": (
-        "You must ACTUALLY verify Moltbook credentials persist. Do this:\n\n"
-        "1. If you got an API key from registration, use it to fetch your profile:\n"
-        "   curl -s https://www.moltbook.com/api/v1/agents/me "
-        '-H "Authorization: Bearer <API_KEY>"\n\n'
-        "2. Try listing posts to verify the key works:\n"
-        "   curl -s https://www.moltbook.com/api/v1/posts "
-        '-H "Authorization: Bearer <API_KEY>"\n\n'
-        "3. Report whether the API key is still valid and returns data.\n\n"
-    ),
-    "signbee": (
-        "You must ACTUALLY verify Signbee credential persistence. Do this:\n\n"
-        "1. If you got an API key, use it to list documents:\n"
-        "   curl -s https://signb.ee/api/v1/documents "
-        '-H "Authorization: Bearer <API_KEY>"\n\n'
-        "2. If you sent a document in Test 1, check its status:\n"
-        "   curl -s https://signb.ee/api/v1/documents/<DOCUMENT_ID> "
-        '-H "Authorization: Bearer <API_KEY>"\n\n'
-        "3. If no credentials, try the API unauthenticated and report what error you get.\n\n"
-    ),
-    "browser-use": (
-        "You must ACTUALLY verify Browser Use credential persistence. Do this:\n\n"
-        "1. If you have an API key (starts with bu_), verify it still works:\n"
-        "   curl -s https://api.browser-use.com/api/v3/sessions "
-        '-H "X-Browser-Use-API-Key: <API_KEY>"\n\n'
-        "2. If no key, try the API unauthenticated:\n"
-        "   curl -s https://api.browser-use.com/api/v3/sessions\n\n"
-        "3. Report whether the key/session is still valid.\n\n"
-    ),
-}
 
 
 class TestPersistence(BaseTest):
@@ -76,22 +24,30 @@ class TestPersistence(BaseTest):
 
         harness_name, model = get_harness_for_service(slug)
 
-        service_prompt = PERSISTENCE_PROMPTS.get(slug, "")
-        if not service_prompt:
-            service_prompt = (
-                f"Verify that credentials for {name} persist. Re-use any API keys or tokens "
-                f"from the signup step. Make real curl requests and report responses.\n\n"
-            )
+        # ── Step 1: Execute real HTTP calls directly ──────────────────────────
+        print(f"    [executor] Verifying credential persistence for {name}...")
+        steps = execute_persist(slug, state)
+        http_summary = format_steps(steps)
+        save_log(run_id, "t2_persist_http_raw", http_summary)
 
+        # ── Step 2: Ask AI harness to analyze the actual responses ────────────
         prompt = (
-            f"You are a verification agent. ACTUALLY EXECUTE these steps — make real HTTP requests.\n\n"
+            f"You are analyzing REAL API call results to verify credential persistence.\n"
+            f"These HTTP requests were already executed — your job is to analyze the responses.\n\n"
             f"Service: {name}\n"
             f"Signup method from Test 1: {signup_method}\n\n"
-            f"{service_prompt}"
-            f"After executing, output exactly this line:\n"
+            f"=== ACTUAL HTTP RESULTS ===\n"
+            f"{http_summary}\n"
+            f"=== END RESULTS ===\n\n"
+            f"Based on these real HTTP responses, determine:\n"
+            f"1. Did credentials from signup persist? (API key still works, returns valid data)\n"
+            f"2. Does the account still exist after the session?\n"
+            f"3. Was there a persistence failure? (401 unauthorized, 404 not found, session expired)\n\n"
+            f"Do NOT browse the web. Analyze only the responses above.\n\n"
+            f"Output exactly this line:\n"
             f'VERDICT: {{"passed": true/false, "confidence": 0.0-1.0, '
-            f'"reason": "describe what actually happened — include HTTP status codes and whether credentials still worked", '
-            f'"blocker": null or "specific issue"}}'
+            f'"reason": "what the HTTP responses show about credential persistence", '
+            f'"blocker": null or "specific issue (e.g. no API key from signup, 401 unauthorized)"}}'
         )
 
         try:
@@ -101,7 +57,7 @@ class TestPersistence(BaseTest):
                 model=model,
                 run_id=run_id,
                 test_name="t2_persist",
-                timeout=600,
+                timeout=120,
             )
 
             passed = result.get("passed", False)
@@ -117,6 +73,7 @@ class TestPersistence(BaseTest):
                 confidence=confidence,
                 failure_reason=None if passed else reason,
                 evidence_artifacts={
+                    "http_raw": f"{run_id}/t2_persist_http_raw.log",
                     "agent_output": f"{run_id}/t2_persist_{harness_name}_stdout.log",
                 },
                 details={
@@ -126,6 +83,7 @@ class TestPersistence(BaseTest):
                     "response_time_s": elapsed,
                     "agent_reasoning": reason,
                     "blocker_type": result.get("blocker"),
+                    "http_steps": len(steps),
                     "raw_output_excerpt": result.get("raw_output", "")[:500],
                 },
             )
