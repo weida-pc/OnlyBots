@@ -148,6 +148,10 @@ def signup_agentmail(state: dict) -> list[dict]:
         if "api_key" in data:
             state["agentmail_api_key"] = data["api_key"]
             state["agentmail_org_id"] = data.get("organization_id", "")
+        # Signup creates an inbox automatically — store it so workflow can reuse it
+        if "inbox_id" in data:
+            state["agentmail_inbox_id"] = data["inbox_id"]
+            state["agentmail_inbox_email"] = data["inbox_id"]  # inbox_id IS the email address
     except Exception:
         pass
 
@@ -178,41 +182,43 @@ def persist_agentmail(state: dict) -> list[dict]:
 
 
 def workflow_agentmail(state: dict) -> list[dict]:
-    """Execute full AgentMail workflow: create inbox → send email → verify receipt."""
+    """Execute full AgentMail workflow: use signup inbox → send email → verify receipt."""
     api_key = state.get("agentmail_api_key", "")
     if not api_key:
         return [{"step": "workflow skipped — no API key from signup", "status": 0, "body": "", "elapsed_ms": 0, "error": "Missing API key"}]
 
     steps = []
 
-    # 1. Create inbox
-    step1 = {"step": "POST https://api.agentmail.to/v0/inboxes (create inbox)"}
-    r1 = http_post(
-        "https://api.agentmail.to/v0/inboxes",
-        {"display_name": "OnlyBots Verification Inbox"},
-        headers={"Authorization": f"Bearer {api_key}"},
-    )
-    step1.update(r1)
-    steps.append(step1)
+    # Use the inbox created during signup (reuse, don't create new — limit is 1 per org)
+    inbox_id = state.get("agentmail_inbox_id")
 
-    inbox_id = None
-    inbox_address = None
-    try:
-        data = json.loads(r1["body"])
-        inbox_id = data.get("id") or data.get("inbox_id")
-        inbox_address = data.get("address") or data.get("email")
-    except Exception:
-        pass
+    if not inbox_id:
+        # List inboxes to find existing one
+        list_step = {"step": "GET /v0/inboxes (find existing inbox)"}
+        r_list = http_get(
+            "https://api.agentmail.to/v0/inboxes",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        list_step.update(r_list)
+        steps.append(list_step)
+        try:
+            data = json.loads(r_list["body"])
+            inboxes = data.get("inboxes", [])
+            if inboxes:
+                inbox_id = inboxes[0].get("inbox_id") or inboxes[0].get("id")
+        except Exception:
+            pass
 
     if not inbox_id:
         return steps
 
-    # 2. Send email to self
+    # Send email to self
+    inbox_email = state.get("agentmail_inbox_email") or inbox_id
     step2 = {"step": f"POST /v0/inboxes/{inbox_id}/messages (send email)"}
     r2 = http_post(
         f"https://api.agentmail.to/v0/inboxes/{inbox_id}/messages",
         {
-            "to": [{"email": inbox_address or f"{inbox_id}@agentmail.to"}],
+            "to": [{"email": inbox_email}],
             "subject": "OnlyBots Verification Test",
             "body": "This is an automated test by OnlyBots.",
         },
@@ -221,7 +227,7 @@ def workflow_agentmail(state: dict) -> list[dict]:
     step2.update(r2)
     steps.append(step2)
 
-    # 3. List messages to verify receipt
+    # List messages to verify receipt
     step3 = {"step": f"GET /v0/inboxes/{inbox_id}/messages (verify receipt)"}
     r3 = http_get(
         f"https://api.agentmail.to/v0/inboxes/{inbox_id}/messages",
@@ -795,11 +801,11 @@ def verdict_workflow(slug: str, steps: list[dict], state: dict) -> dict:
             data = _parse_json(list_step)
             count = data.get("count", "?")
             return {"passed": True, "confidence": 1.0,
-                    "reason": f"Full workflow complete: inbox created, email sent (HTTP {send_step['status']}), messages verified (count={count}).",
+                    "reason": f"Full workflow complete: used signup inbox, email sent (HTTP {send_step['status']}), messages verified (count={count}).",
                     "blocker": None}
         failed = [s for s in steps if not _ok(s)]
         return {"passed": False, "confidence": 1.0,
-                "reason": f"Workflow incomplete. Failed steps: {[s['step'] for s in failed]}",
+                "reason": f"Workflow incomplete. Failed steps: {[s['step'] for s in failed]}. Statuses: {[s.get('status') for s in steps]}",
                 "blocker": f"HTTP {failed[0]['status']}" if failed else "incomplete"}
 
     elif slug == "here-now":
