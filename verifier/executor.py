@@ -220,7 +220,7 @@ def workflow_agentmail(state: dict) -> list[dict]:
     r2 = http_post(
         f"https://api.agentmail.to/v0/inboxes/{inbox_id_encoded}/messages/send",
         {
-            "to": [{"email": "verify@onlybots.com"}],
+            "to": ["verify@onlybots.com"],
             "subject": "OnlyBots Verification Test",
             "body": "This is an automated test by OnlyBots trust registry.",
         },
