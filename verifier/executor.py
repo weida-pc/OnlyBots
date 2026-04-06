@@ -215,10 +215,10 @@ def workflow_agentmail(state: dict) -> list[dict]:
     # URL-encode the inbox_id for use in path (@ must be %40)
     inbox_id_encoded = urllib.parse.quote(inbox_id, safe="")
 
-    # Send email (to an external address — sending to self may not be supported)
-    step2 = {"step": f"POST /v0/inboxes/{inbox_id}/messages (send email)"}
+    # Send email — correct endpoint is /messages/send not /messages
+    step2 = {"step": f"POST /v0/inboxes/{inbox_id}/messages/send (send email)"}
     r2 = http_post(
-        f"https://api.agentmail.to/v0/inboxes/{inbox_id_encoded}/messages",
+        f"https://api.agentmail.to/v0/inboxes/{inbox_id_encoded}/messages/send",
         {
             "to": [{"email": "verify@onlybots.com"}],
             "subject": "OnlyBots Verification Test",
