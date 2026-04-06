@@ -66,10 +66,10 @@ HARNESSES = {
 # Format: {slug: (harness_name, model_override_or_None)}
 # Default: gemini with gemini-3.1-pro-preview
 SERVICE_HARNESS_MAP = {
-    "agentmail-to": ("gemini", "gemini-3.1-pro-preview"),
-    "here-now": ("gemini", "gemini-3.1-pro-preview"),
-    "moltbook": ("gemini", "gemini-3.1-pro-preview"),
-    "signbee": ("gemini", "gemini-3.1-pro-preview"),
-    "browser-use": ("gemini", "gemini-3.1-pro-preview"),
+    "agentmail-to": ("gemini", "gemini-3-flash-preview"),
+    "here-now": ("gemini", "gemini-3-flash-preview"),
+    "moltbook": ("gemini", "gemini-3-flash-preview"),
+    "signbee": ("gemini", "gemini-3-flash-preview"),
+    "browser-use": ("gemini", "gemini-3-flash-preview"),
 }
-DEFAULT_HARNESS = ("gemini", "gemini-3.1-pro-preview")
+DEFAULT_HARNESS = ("gemini", "gemini-3-flash-preview")

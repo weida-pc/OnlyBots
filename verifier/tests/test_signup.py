@@ -1,13 +1,74 @@
 """Test 1 — Autonomous Signup.
 
-Can an AI agent create an account on this service without human intervention?
-Delegates to the configured CLI agent harness (Gemini, Claude, Codex, etc.).
+Actually attempts to create an account on the service via API calls.
+The agent CLI executes real HTTP requests and reports what happened.
 """
 from __future__ import annotations
 
 from harness import run_agent, get_harness_for_service
 from evidence import save_log
 from tests.base import BaseTest, TestResult
+
+# Per-service prompts that tell the agent to ACTUALLY sign up
+SIGNUP_PROMPTS = {
+    "agentmail-to": (
+        "You must ACTUALLY sign up for AgentMail by making real API calls. Do this:\n\n"
+        "1. Run: curl -s -X POST https://api.agentmail.to/v0/agent/sign-up "
+        '-H "Content-Type: application/json" '
+        "-d '{\"human_email\": \"onlybots-verify@agentmail.to\", \"username\": \"onlybots-test-'$(date +%s)'\"}'\n\n"
+        "2. Check the response. If it returns an API key or organization_id, signup succeeded.\n"
+        "   If it requires email OTP verification, note that as a blocker.\n"
+        "   If it returns an error, note the error.\n\n"
+        "3. Report exactly what HTTP status code and response body you got.\n\n"
+    ),
+    "here-now": (
+        "You must ACTUALLY publish a test page on here.now. Do this:\n\n"
+        "1. Run: curl -s -X POST https://here.now/api/v1/publish "
+        '-H "Content-Type: application/json" '
+        '-H "X-HereNow-Client: onlybots/verifier" '
+        "-d '{\"files\": [{\"path\": \"index.html\", \"size\": 44, \"contentType\": \"text/html; charset=utf-8\"}]}'\n\n"
+        "2. Check the response for presigned upload URLs and a slug.\n\n"
+        "3. If you got upload URLs, upload test content:\n"
+        "   curl -X PUT \"<presigned_url>\" -H \"Content-Type: text/html\" "
+        "--data '<h1>OnlyBots Test</h1>'\n\n"
+        "4. Finalize: curl -s -X POST \"<finalize_url>\" "
+        "-H \"Content-Type: application/json\" -d '{\"versionId\": \"<versionId>\"}'\n\n"
+        "5. Visit the returned siteUrl to verify it loads.\n\n"
+        "Report every HTTP status code and response body you get.\n\n"
+    ),
+    "moltbook": (
+        "You must ACTUALLY register an agent on Moltbook. Do this:\n\n"
+        "1. Run: curl -s -X POST https://www.moltbook.com/api/v1/agents/register "
+        '-H "Content-Type: application/json" '
+        "-d '{\"name\": \"OnlyBots-Verifier-'$(date +%s)'\", \"description\": \"Automated verification agent for OnlyBots trust registry\"}'\n\n"
+        "2. Check the response. If it returns an API key or agent ID, registration succeeded.\n"
+        "   If it requires Twitter/X verification or manual approval, note that as a blocker.\n"
+        "   If it returns an error, note the exact error.\n\n"
+        "3. Report exactly what HTTP status code and response body you got.\n\n"
+    ),
+    "signbee": (
+        "You must ACTUALLY test Signbee's signup flow. Do this:\n\n"
+        "1. First check if there's an API signup: curl -s https://signb.ee/api/v1/auth/signup 2>&1\n\n"
+        "2. Try to access the dashboard API key page: curl -s https://signb.ee/dashboard 2>&1 | head -50\n\n"
+        "3. Try sending a test document without auth to see what happens:\n"
+        "   curl -s -X POST https://signb.ee/api/v1/send "
+        '-H "Content-Type: application/json" '
+        "-d '{\"recipient_name\": \"OnlyBots Test\", \"recipient_email\": \"test@example.com\", \"markdown\": \"# Test Document\\n\\nThis is an automated verification test from OnlyBots.\"}'\n\n"
+        "4. Report every HTTP status code and response body you get.\n"
+        "   Note whether signup requires a browser/GUI or can be done via API.\n\n"
+    ),
+    "browser-use": (
+        "You must ACTUALLY test Browser Use's signup and API. Do this:\n\n"
+        "1. Check if there's a programmatic signup: curl -s https://api.browser-use.com/api/v3/auth/signup 2>&1\n\n"
+        "2. Try accessing the API without a key to see what error you get:\n"
+        "   curl -s -X POST https://api.browser-use.com/api/v3/sessions "
+        '-H "Content-Type: application/json" '
+        "-d '{\"task\": \"test\"}'\n\n"
+        "3. Check what cloud.browser-use.com returns: curl -s https://cloud.browser-use.com/settings 2>&1 | head -50\n\n"
+        "4. Report every HTTP status code and response body you get.\n"
+        "   Note whether signup requires a browser/GUI or can be done via API.\n\n"
+    ),
+}
 
 
 class TestSignup(BaseTest):
@@ -18,36 +79,27 @@ class TestSignup(BaseTest):
         slug = service["slug"]
         name = service["name"]
         signup_url = service["signup_url"]
-        description = service.get("description", "")
-        core_workflow = service.get("core_workflow", "")
-        docs_url = service.get("docs_url", "")
 
         harness_name, model = get_harness_for_service(slug)
 
+        service_prompt = SIGNUP_PROMPTS.get(slug, "")
+        if not service_prompt:
+            service_prompt = (
+                f"Try to sign up for {name} at {signup_url} by making real HTTP requests.\n"
+                f"Use curl to hit the signup URL and any API endpoints you can find.\n"
+                f"Report every HTTP status code and response body.\n\n"
+            )
+
         prompt = (
-            f"You are a verification agent. Your task is to determine whether an AI agent "
-            f"can AUTONOMOUSLY sign up for the service '{name}'.\n\n"
-            f"Service description: {description}\n"
-            f"Signup URL: {signup_url}\n"
-            f"Docs URL: {docs_url}\n"
-            f"Core workflow: {core_workflow}\n\n"
-            f"Visit {signup_url} and analyze the signup process. Then check {docs_url} if needed.\n\n"
-            f"Determine:\n"
-            f"1. Is there a signup/registration that an AI can complete without human help?\n"
-            f"   - Email + password form = PASS\n"
-            f"   - API key registration via API = PASS\n"
-            f"   - Claim-code / no-account-needed = PASS\n"
-            f"   - Skills/MCP install that auto-provisions = PASS\n"
-            f"2. Are there any BLOCKERS preventing autonomous signup?\n"
-            f"   - CAPTCHA, reCAPTCHA, hCaptcha, Cloudflare = FAIL\n"
-            f"   - Phone/SMS verification = FAIL\n"
-            f"   - OAuth-only with no email option = FAIL\n"
-            f"   - Manual approval/waitlist = FAIL\n\n"
-            f"Do NOT submit real credentials. Just verify the flow is possible.\n\n"
-            f"When done, output exactly this line:\n"
+            f"You are a verification agent. ACTUALLY EXECUTE these steps — do not just describe them.\n"
+            f"Make real HTTP requests using curl and report the real responses.\n\n"
+            f"Service: {name}\n"
+            f"Signup URL: {signup_url}\n\n"
+            f"{service_prompt}"
+            f"After executing, output exactly this line:\n"
             f'VERDICT: {{"passed": true/false, "confidence": 0.0-1.0, '
-            f'"reason": "your detailed explanation of what you found", '
-            f'"blocker": null or "specific blocker description"}}'
+            f'"reason": "describe what actually happened when you tried to sign up — include HTTP status codes and key response fields", '
+            f'"blocker": null or "specific blocker you hit"}}'
         )
 
         try:
@@ -98,10 +150,5 @@ class TestSignup(BaseTest):
                 confidence=0.1,
                 failure_reason=f"Harness error: {e}",
                 evidence_artifacts={"error_log": f"{run_id}/t1_signup_error.log"},
-                details={
-                    "harness": harness_name,
-                    "model": model,
-                    "url_tested": signup_url,
-                    "error": str(e),
-                },
+                details={"harness": harness_name, "model": model, "url_tested": signup_url, "error": str(e)},
             )
