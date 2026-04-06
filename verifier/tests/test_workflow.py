@@ -1,12 +1,12 @@
 """Test 3 — Core Workflow Autonomy.
 
-Executes the service's primary workflow via direct HTTP calls (fast, no browsing),
-then asks the AI harness to analyze the actual responses and produce a verdict.
+Executes the service's primary workflow via direct HTTP calls.
+Verdict is determined by Python logic on actual HTTP responses.
 """
 from __future__ import annotations
 
-from executor import execute_workflow, format_steps
-from harness import run_agent, get_harness_for_service
+from executor import execute_workflow, format_steps, verdict_workflow
+from harness import get_harness_for_service
 from evidence import save_log
 from tests.base import BaseTest, TestResult
 
@@ -24,76 +24,37 @@ class TestWorkflow(BaseTest):
 
         harness_name, model = get_harness_for_service(slug)
 
-        # ── Step 1: Execute real HTTP workflow calls directly ─────────────────
+        # Execute real HTTP workflow calls
         print(f"    [executor] Executing core workflow for {name}...")
         steps = execute_workflow(slug, state)
         http_summary = format_steps(steps)
         save_log(run_id, "t3_workflow_http_raw", http_summary)
 
-        # ── Step 2: Ask AI harness to analyze the actual responses ────────────
-        prompt = (
-            f"You are analyzing REAL API call results from an autonomous workflow execution.\n"
-            f"These HTTP requests were already executed — your job is to analyze the responses.\n\n"
-            f"Service: {name}\n"
-            f"Core workflow: {core_workflow}\n\n"
-            f"=== ACTUAL HTTP RESULTS ===\n"
-            f"{http_summary}\n"
-            f"=== END RESULTS ===\n\n"
-            f"Based on these real HTTP responses, determine:\n"
-            f"1. Did the core workflow complete end-to-end?\n"
-            f"2. Did each step return a success status code (2xx)?\n"
-            f"3. Was there any blocker preventing full workflow completion?\n"
-            f"   (e.g. missing API key from earlier step, 401, 404, rate limit)\n\n"
-            f"Do NOT browse the web. Analyze only the responses above.\n\n"
-            f"Output exactly this line:\n"
-            f'VERDICT: {{"passed": true/false, "confidence": 0.0-1.0, '
-            f'"reason": "describe what the HTTP responses show — include status codes and whether workflow completed end-to-end", '
-            f'"blocker": null or "specific issue that prevented workflow completion"}}'
+        # Determine verdict from actual HTTP responses
+        verdict = verdict_workflow(slug, steps, state)
+
+        passed = verdict["passed"]
+        confidence = verdict["confidence"]
+        reason = verdict["reason"]
+        blocker = verdict.get("blocker")
+
+        return TestResult(
+            passed=passed,
+            confidence=confidence,
+            failure_reason=None if passed else reason,
+            evidence_artifacts={
+                "http_raw": f"{run_id}/t3_workflow_http_raw.log",
+            },
+            details={
+                "harness": harness_name,
+                "model": model,
+                "method": "direct_http",
+                "url_tested": docs_url or url,
+                "response_time_s": sum(s.get("elapsed_ms", 0) for s in steps) / 1000,
+                "core_workflow": core_workflow,
+                "agent_reasoning": reason,
+                "blocker_type": blocker,
+                "http_steps": len(steps),
+                "http_statuses": [s.get("status") for s in steps],
+            },
         )
-
-        try:
-            result = run_agent(
-                prompt=prompt,
-                harness_name=harness_name,
-                model=model,
-                run_id=run_id,
-                test_name="t3_workflow",
-                timeout=120,
-            )
-
-            passed = result.get("passed", False)
-            confidence = result.get("confidence", 0.5)
-            reason = result.get("reason", "No reason")
-            elapsed = result.get("response_time_s", 0)
-
-            return TestResult(
-                passed=passed,
-                confidence=confidence,
-                failure_reason=None if passed else reason,
-                evidence_artifacts={
-                    "http_raw": f"{run_id}/t3_workflow_http_raw.log",
-                    "agent_output": f"{run_id}/t3_workflow_{harness_name}_stdout.log",
-                },
-                details={
-                    "harness": result.get("harness", harness_name),
-                    "model": result.get("model", model),
-                    "url_tested": docs_url or url,
-                    "response_time_s": elapsed,
-                    "core_workflow": core_workflow,
-                    "agent_reasoning": reason,
-                    "blocker_type": result.get("blocker"),
-                    "http_steps": len(steps),
-                    "raw_output_excerpt": result.get("raw_output", "")[:500],
-                },
-            )
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            save_log(run_id, "t3_workflow_error", str(e))
-            return TestResult(
-                passed=False, confidence=0.1,
-                failure_reason=f"Harness error: {e}",
-                evidence_artifacts={"error_log": f"{run_id}/t3_workflow_error.log"},
-                details={"harness": harness_name, "model": model, "error": str(e)},
-            )

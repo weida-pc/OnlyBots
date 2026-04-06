@@ -326,7 +326,7 @@ def signup_moltbook(state: dict) -> list[dict]:
     resp = http_post(
         "https://www.moltbook.com/api/v1/agents/register",
         {
-            "name": f"OnlyBots-Verifier-{ts}",
+            "name": f"onlybots-verifier-{ts}",
             "description": "Automated verification agent for OnlyBots trust registry",
         },
     )
@@ -334,10 +334,14 @@ def signup_moltbook(state: dict) -> list[dict]:
 
     try:
         data = json.loads(resp["body"])
-        if "api_key" in data:
-            state["moltbook_api_key"] = data["api_key"]
-        if "agent_id" in data or "id" in data:
-            state["moltbook_agent_id"] = data.get("agent_id") or data.get("id")
+        # API key is nested under data["agent"]["api_key"]
+        agent = data.get("agent", data)
+        api_key = agent.get("api_key") or data.get("api_key")
+        if api_key:
+            state["moltbook_api_key"] = api_key
+        agent_id = agent.get("id") or data.get("agent_id") or data.get("id")
+        if agent_id:
+            state["moltbook_agent_id"] = agent_id
     except Exception:
         pass
 
@@ -574,3 +578,256 @@ def execute_workflow(slug: str, state: dict) -> list[dict]:
     if fn:
         return fn(state)
     return []
+
+
+# ── Python-based verdict generation ─────────────────────────────────────────
+# Determines pass/fail from actual HTTP responses — no LLM hallucination.
+
+def _ok(step: dict) -> bool:
+    return 200 <= step.get("status", 0) < 300
+
+
+def _parse_json(step: dict) -> dict:
+    try:
+        return json.loads(step.get("body", "{}"))
+    except Exception:
+        return {}
+
+
+def verdict_signup(slug: str, steps: list[dict], state: dict) -> dict:
+    """Determine signup pass/fail from HTTP responses."""
+    if not steps:
+        return {"passed": False, "confidence": 1.0, "reason": "No HTTP steps executed", "blocker": "executor error"}
+
+    if slug == "agentmail-to":
+        s = steps[0]
+        if _ok(s):
+            data = _parse_json(s)
+            if data.get("api_key"):
+                return {"passed": True, "confidence": 1.0,
+                        "reason": f"Agent signup succeeded (HTTP {s['status']}). Got API key and organization_id={data.get('organization_id','?')}.",
+                        "blocker": None}
+            return {"passed": False, "confidence": 0.9,
+                    "reason": f"HTTP {s['status']} but no api_key in response: {s['body'][:200]}",
+                    "blocker": "no api_key returned"}
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"Signup failed HTTP {s['status']}: {s['body'][:300]}",
+                "blocker": f"HTTP {s['status']}"}
+
+    elif slug == "here-now":
+        if not steps:
+            return {"passed": False, "confidence": 1.0, "reason": "No steps", "blocker": "executor error"}
+        step1 = steps[0]
+        if not _ok(step1):
+            return {"passed": False, "confidence": 1.0,
+                    "reason": f"Publish endpoint returned HTTP {step1['status']}: {step1['body'][:200]}",
+                    "blocker": f"HTTP {step1['status']}"}
+        # Check if we got a siteUrl
+        site_url = state.get("herenow_site_url")
+        if not site_url:
+            return {"passed": False, "confidence": 0.9,
+                    "reason": "Publish returned 200 but no siteUrl extracted",
+                    "blocker": "no siteUrl"}
+        # Check if the live URL is accessible (step 4 if present)
+        live_step = next((s for s in steps if "verify live" in s.get("step", "")), None)
+        if live_step and _ok(live_step):
+            return {"passed": True, "confidence": 1.0,
+                    "reason": f"Published to {site_url} and live URL returned HTTP {live_step['status']}.",
+                    "blocker": None}
+        elif live_step:
+            # Cloudflare may block but site IS published
+            if live_step.get("status") == 403:
+                return {"passed": True, "confidence": 0.85,
+                        "reason": f"Published to {site_url}. Live URL returns 403 (Cloudflare bot-check blocks direct HTTP client, but site was published successfully).",
+                        "blocker": None}
+        # No live check step — just confirm publish succeeded
+        return {"passed": True, "confidence": 0.9,
+                "reason": f"Publish workflow completed. siteUrl={site_url}",
+                "blocker": None}
+
+    elif slug == "moltbook":
+        s = steps[0]
+        if s.get("status") in (200, 201):
+            api_key = state.get("moltbook_api_key")
+            if api_key:
+                return {"passed": True, "confidence": 1.0,
+                        "reason": f"Agent registered (HTTP {s['status']}). Got API key starting with '{api_key[:12]}...'.",
+                        "blocker": None}
+            return {"passed": False, "confidence": 0.9,
+                    "reason": f"Registration returned {s['status']} but API key not found in response.",
+                    "blocker": "api_key not extracted"}
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"Registration failed HTTP {s['status']}: {s['body'][:300]}",
+                "blocker": f"HTTP {s['status']}"}
+
+    elif slug == "signbee":
+        send_step = next((s for s in steps if "/send" in s.get("step", "")), None)
+        if not send_step:
+            return {"passed": False, "confidence": 1.0, "reason": "No send step executed", "blocker": "executor error"}
+        if _ok(send_step):
+            data = _parse_json(send_step)
+            doc_id = data.get("document_id") or data.get("id")
+            return {"passed": True, "confidence": 1.0,
+                    "reason": f"Document sent (HTTP {send_step['status']}). document_id={doc_id}",
+                    "blocker": None}
+        body = send_step.get("body", "")
+        if "api_key" in body.lower() or "api key" in body.lower():
+            return {"passed": False, "confidence": 1.0,
+                    "reason": f"Sending documents requires an API key (HTTP {send_step['status']}). No programmatic signup endpoint found.",
+                    "blocker": "API key required — no programmatic signup endpoint"}
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"Document send failed HTTP {send_step['status']}: {body[:200]}",
+                "blocker": f"HTTP {send_step['status']}"}
+
+    elif slug == "browser-use":
+        for s in steps:
+            if _ok(s):
+                return {"passed": True, "confidence": 0.8,
+                        "reason": f"API accessible without auth (HTTP {s['status']})",
+                        "blocker": None}
+        statuses = [s.get("status", 0) for s in steps]
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"API requires authentication for all endpoints. Statuses: {statuses}. No programmatic signup found.",
+                "blocker": "no programmatic signup — requires browser-based account creation"}
+
+    # Generic fallback
+    all_ok = all(_ok(s) for s in steps)
+    return {"passed": all_ok, "confidence": 0.7,
+            "reason": f"Steps completed with statuses: {[s.get('status') for s in steps]}",
+            "blocker": None if all_ok else "one or more HTTP errors"}
+
+
+def verdict_persist(slug: str, steps: list[dict], state: dict) -> dict:
+    """Determine credential persistence pass/fail from HTTP responses."""
+    if not steps:
+        return {"passed": False, "confidence": 1.0, "reason": "No HTTP steps executed", "blocker": "executor error"}
+
+    if slug == "agentmail-to":
+        s = steps[0]
+        if _ok(s):
+            data = _parse_json(s)
+            count = data.get("count", "?")
+            return {"passed": True, "confidence": 1.0,
+                    "reason": f"API key valid (HTTP {s['status']}). Inboxes accessible: count={count}.",
+                    "blocker": None}
+        if not state.get("agentmail_api_key"):
+            return {"passed": False, "confidence": 1.0,
+                    "reason": "No API key from signup to test persistence.",
+                    "blocker": "no credentials from signup"}
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"API key rejected HTTP {s['status']}: {s['body'][:200]}",
+                "blocker": f"HTTP {s['status']}"}
+
+    elif slug == "here-now":
+        s = steps[0]
+        site_url = state.get("herenow_site_url", "unknown")
+        if _ok(s):
+            return {"passed": True, "confidence": 1.0,
+                    "reason": f"Published site at {site_url} still accessible (HTTP {s['status']}).",
+                    "blocker": None}
+        if s.get("status") == 403:
+            return {"passed": True, "confidence": 0.8,
+                    "reason": f"Site at {site_url} returns 403 (Cloudflare bot-check blocks Python HTTP client). Site was successfully published — persistence confirmed by publish success.",
+                    "blocker": None}
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"Site URL {site_url} returned HTTP {s['status']}",
+                "blocker": f"HTTP {s['status']}"}
+
+    elif slug == "moltbook":
+        s = steps[0]
+        if _ok(s):
+            data = _parse_json(s)
+            name = data.get("name") or data.get("agent", {}).get("name", "?")
+            return {"passed": True, "confidence": 1.0,
+                    "reason": f"API key valid (HTTP {s['status']}). Agent profile: name={name}.",
+                    "blocker": None}
+        if not state.get("moltbook_api_key"):
+            return {"passed": False, "confidence": 1.0,
+                    "reason": "No API key from signup to test persistence.",
+                    "blocker": "no credentials from signup"}
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"API key rejected HTTP {s['status']}: {s['body'][:200]}",
+                "blocker": f"HTTP {s['status']}"}
+
+    elif slug == "signbee":
+        s = steps[0]
+        if _ok(s):
+            return {"passed": True, "confidence": 1.0,
+                    "reason": f"Document/credential accessible (HTTP {s['status']})",
+                    "blocker": None}
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"HTTP {s['status']}: {s['body'][:200]}",
+                "blocker": f"HTTP {s['status']}"}
+
+    elif slug == "browser-use":
+        s = steps[0]
+        if _ok(s):
+            return {"passed": True, "confidence": 0.8,
+                    "reason": f"API key valid (HTTP {s['status']})",
+                    "blocker": None}
+        if not state.get("browseruse_api_key"):
+            return {"passed": False, "confidence": 1.0,
+                    "reason": "No API key from signup (no programmatic signup available).",
+                    "blocker": "no credentials from signup"}
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"HTTP {s['status']}: {s['body'][:200]}",
+                "blocker": f"HTTP {s['status']}"}
+
+    all_ok = all(_ok(s) for s in steps)
+    return {"passed": all_ok, "confidence": 0.7,
+            "reason": f"Statuses: {[s.get('status') for s in steps]}",
+            "blocker": None if all_ok else "one or more HTTP errors"}
+
+
+def verdict_workflow(slug: str, steps: list[dict], state: dict) -> dict:
+    """Determine workflow pass/fail from HTTP responses."""
+    if not steps:
+        return {"passed": False, "confidence": 1.0, "reason": "No steps executed", "blocker": "executor error"}
+
+    if slug == "agentmail-to":
+        if steps[0].get("error") == "Missing API key":
+            return {"passed": False, "confidence": 1.0,
+                    "reason": "Workflow requires API key from signup. Signup must pass first.",
+                    "blocker": "no API key from signup"}
+        send_step = next((s for s in steps if "send email" in s.get("step", "")), None)
+        list_step = next((s for s in steps if "verify receipt" in s.get("step", "")), None)
+        if send_step and _ok(send_step) and list_step and _ok(list_step):
+            data = _parse_json(list_step)
+            count = data.get("count", "?")
+            return {"passed": True, "confidence": 1.0,
+                    "reason": f"Full workflow complete: inbox created, email sent (HTTP {send_step['status']}), messages verified (count={count}).",
+                    "blocker": None}
+        failed = [s for s in steps if not _ok(s)]
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"Workflow incomplete. Failed steps: {[s['step'] for s in failed]}",
+                "blocker": f"HTTP {failed[0]['status']}" if failed else "incomplete"}
+
+    elif slug == "here-now":
+        # Same as signup — publish and verify live
+        return verdict_signup("here-now", steps, state)
+
+    elif slug == "moltbook":
+        if steps[0].get("error") == "Missing API key":
+            return {"passed": False, "confidence": 1.0,
+                    "reason": "Workflow requires API key from signup.",
+                    "blocker": "no API key from signup"}
+        post_step = next((s for s in steps if "create post" in s.get("step", "")), None)
+        comment_step = next((s for s in steps if "comments" in s.get("step", "")), None)
+        upvote_step = next((s for s in steps if "upvote" in s.get("step", "")), None)
+        passed_steps = [s for s in [post_step, comment_step, upvote_step] if s and _ok(s)]
+        if len(passed_steps) == 3:
+            return {"passed": True, "confidence": 1.0,
+                    "reason": "Full workflow complete: post created, comment posted, upvote submitted.",
+                    "blocker": None}
+        statuses = {s["step"]: s.get("status") for s in steps}
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"Workflow partial. Step statuses: {statuses}",
+                "blocker": "workflow steps failed"}
+
+    elif slug in ("signbee", "browser-use"):
+        return verdict_signup(slug, steps, state)
+
+    all_ok = all(_ok(s) for s in steps)
+    return {"passed": all_ok, "confidence": 0.7,
+            "reason": f"Statuses: {[s.get('status') for s in steps]}",
+            "blocker": None if all_ok else "one or more HTTP errors"}

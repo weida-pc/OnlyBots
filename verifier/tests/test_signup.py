@@ -1,12 +1,13 @@
 """Test 1 — Autonomous Signup.
 
-Executes real HTTP requests directly (fast, no browsing), then asks the AI
-harness to analyze the actual responses and produce a verdict.
+Makes real HTTP requests directly (fast, no LLM browsing), then uses
+Python-based verdict logic on the actual responses. The AI harness name
+is recorded for provenance but pass/fail is determined deterministically.
 """
 from __future__ import annotations
 
-from executor import execute_signup, format_steps
-from harness import run_agent, get_harness_for_service
+from executor import execute_signup, format_steps, verdict_signup
+from harness import get_harness_for_service
 from evidence import save_log
 from tests.base import BaseTest, TestResult
 
@@ -22,81 +23,41 @@ class TestSignup(BaseTest):
 
         harness_name, model = get_harness_for_service(slug)
 
-        # ── Step 1: Execute real HTTP calls directly ──────────────────────────
+        # Execute real HTTP calls directly
         print(f"    [executor] Making direct HTTP calls for {name} signup...")
         steps = execute_signup(slug, state)
         http_summary = format_steps(steps)
         save_log(run_id, "t1_signup_http_raw", http_summary)
 
-        # ── Step 2: Ask AI harness to analyze the actual responses ────────────
-        prompt = (
-            f"You are analyzing REAL API call results from an autonomous signup attempt.\n"
-            f"These HTTP requests were already executed — your job is to analyze the responses.\n\n"
-            f"Service: {name}\n"
-            f"Signup URL: {signup_url}\n\n"
-            f"=== ACTUAL HTTP RESULTS ===\n"
-            f"{http_summary}\n"
-            f"=== END RESULTS ===\n\n"
-            f"Based on these real HTTP responses, determine:\n"
-            f"1. Did signup succeed? (Got API key, session token, or account created)\n"
-            f"2. Was it blocked? (Requires email OTP, CAPTCHA, browser GUI, manual approval)\n"
-            f"3. How confident are you based on these actual responses?\n\n"
-            f"Do NOT browse the web. Analyze only the responses above.\n\n"
-            f"Output exactly this line:\n"
-            f'VERDICT: {{"passed": true/false, "confidence": 0.0-1.0, '
-            f'"reason": "what the HTTP responses show about signup success/failure", '
-            f'"blocker": null or "specific blocker (e.g. email OTP required, CAPTCHA, no API endpoint)"}}'
+        # Determine verdict from actual HTTP responses (deterministic, no hallucination)
+        verdict = verdict_signup(slug, steps, state)
+
+        passed = verdict["passed"]
+        confidence = verdict["confidence"]
+        reason = verdict["reason"]
+        blocker = verdict.get("blocker")
+
+        if passed:
+            state["signup_verified"] = True
+            state["signup_method"] = reason
+            state["signup_url"] = signup_url
+
+        return TestResult(
+            passed=passed,
+            confidence=confidence,
+            failure_reason=None if passed else (f"Blocked: {blocker}" if blocker else reason),
+            evidence_artifacts={
+                "http_raw": f"{run_id}/t1_signup_http_raw.log",
+            },
+            details={
+                "harness": harness_name,
+                "model": model,
+                "method": "direct_http",
+                "url_tested": signup_url,
+                "response_time_s": sum(s.get("elapsed_ms", 0) for s in steps) / 1000,
+                "agent_reasoning": reason,
+                "blocker_type": blocker,
+                "http_steps": len(steps),
+                "http_statuses": [s.get("status") for s in steps],
+            },
         )
-
-        try:
-            result = run_agent(
-                prompt=prompt,
-                harness_name=harness_name,
-                model=model,
-                run_id=run_id,
-                test_name="t1_signup",
-                timeout=120,  # 2 min is plenty — no browsing needed
-            )
-
-            passed = result.get("passed", False)
-            confidence = result.get("confidence", 0.5)
-            reason = result.get("reason", "No reason")
-            blocker = result.get("blocker")
-            elapsed = result.get("response_time_s", 0)
-
-            if passed:
-                state["signup_verified"] = True
-                state["signup_method"] = reason
-                state["signup_url"] = signup_url
-
-            return TestResult(
-                passed=passed,
-                confidence=confidence,
-                failure_reason=None if passed else (f"Blocked: {blocker}" if blocker else reason),
-                evidence_artifacts={
-                    "http_raw": f"{run_id}/t1_signup_http_raw.log",
-                    "agent_output": f"{run_id}/t1_signup_{harness_name}_stdout.log",
-                },
-                details={
-                    "harness": result.get("harness", harness_name),
-                    "model": result.get("model", model),
-                    "url_tested": signup_url,
-                    "response_time_s": elapsed,
-                    "agent_reasoning": reason,
-                    "blocker_type": blocker,
-                    "http_steps": len(steps),
-                    "raw_output_excerpt": result.get("raw_output", "")[:500],
-                },
-            )
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            save_log(run_id, "t1_signup_error", str(e))
-            return TestResult(
-                passed=False,
-                confidence=0.1,
-                failure_reason=f"Harness error: {e}",
-                evidence_artifacts={"error_log": f"{run_id}/t1_signup_error.log"},
-                details={"harness": harness_name, "model": model, "url_tested": signup_url, "error": str(e)},
-            )
