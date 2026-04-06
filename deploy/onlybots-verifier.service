@@ -1,0 +1,18 @@
+[Unit]
+Description=OnlyBots Verifier Worker
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=onlybots
+Group=onlybots
+WorkingDirectory=/opt/onlybots/verifier
+EnvironmentFile=/opt/onlybots/.env
+ExecStart=/opt/onlybots/verifier/venv/bin/python main.py
+Restart=always
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

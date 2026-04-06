@@ -1,0 +1,20 @@
+[Unit]
+Description=OnlyBots Web (Next.js)
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=onlybots
+Group=onlybots
+WorkingDirectory=/opt/onlybots
+EnvironmentFile=/opt/onlybots/.env
+Environment=NODE_ENV=production
+Environment=PORT=3000
+ExecStart=/usr/bin/node /opt/onlybots/server.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

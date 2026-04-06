@@ -1,103 +1,93 @@
-import Image from "next/image";
+import Link from "next/link";
+import { getServices } from "@/lib/db";
+import ServiceGrid from "@/components/service-grid";
+import type { Service } from "@/lib/types";
 
-export default function Home() {
+export const dynamic = "force-dynamic";
+
+export default async function HomePage() {
+  const services: Service[] = await getServices();
+
+  const total = services.length;
+  const verified = services.filter((s) => s.status === "verified").length;
+  const failed = services.filter((s) => s.status === "failed").length;
+  const pending = services.filter((s) => s.status === "pending").length;
+
   return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
+    <div className="max-w-6xl mx-auto px-4 py-8">
+      {/* Hero */}
+      <section className="max-w-4xl mx-auto text-center py-16">
+        <h1 className="text-4xl font-bold text-slate-900 mb-4">
+          Trust Registry for Agent-First Services
+        </h1>
+        <p className="text-xl text-slate-600 mb-8">
+          Which services can an AI agent actually sign up for, own, and operate?
+        </p>
+        <div className="flex flex-wrap gap-3 justify-center">
           <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="#registry"
+            className="inline-flex items-center px-5 py-2.5 rounded-md border border-slate-300 text-sm font-semibold text-slate-700 bg-white hover:bg-slate-50 hover:border-slate-400 transition-colors"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
+            Browse Registry
           </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+          <Link
+            href="/submit"
+            className="inline-flex items-center px-5 py-2.5 rounded-md text-sm font-semibold text-white bg-green-600 hover:bg-green-700 transition-colors"
           >
-            Read our docs
-          </a>
+            Submit a Service
+          </Link>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      </section>
+
+      {/* Stats bar */}
+      <section className="mb-12">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="bg-white border border-slate-200 rounded-lg p-5 text-center">
+            <div className="text-3xl font-bold text-slate-900">{total}</div>
+            <div className="text-sm text-slate-500 mt-1">Total Services</div>
+          </div>
+          <div className="bg-white border border-slate-200 rounded-lg p-5 text-center">
+            <div className="text-3xl font-bold text-green-600">{verified}</div>
+            <div className="text-sm text-slate-500 mt-1">Verified</div>
+          </div>
+          <div className="bg-white border border-slate-200 rounded-lg p-5 text-center">
+            <div className="text-3xl font-bold text-red-600">{failed}</div>
+            <div className="text-sm text-slate-500 mt-1">Failed</div>
+          </div>
+          <div className="bg-white border border-slate-200 rounded-lg p-5 text-center">
+            <div className="text-3xl font-bold text-amber-600">{pending}</div>
+            <div className="text-sm text-slate-500 mt-1">Pending</div>
+          </div>
+        </div>
+      </section>
+
+      {/* Registry */}
+      <section id="registry" className="mb-16">
+        <h2 className="text-xl font-semibold text-slate-900 mb-6">Registry</h2>
+        <ServiceGrid initialServices={services} />
+      </section>
+
+      {/* Discovery links */}
+      <section className="border-t border-slate-200 pt-8 text-center">
+        <p className="text-sm text-slate-400 mb-2">Machine-readable endpoints</p>
+        <div className="flex flex-wrap gap-x-4 gap-y-1 justify-center text-sm text-slate-400">
+          <a href="/api/services" className="hover:text-slate-600 transition-colors font-mono">
+            /api/services
+          </a>
+          <span className="select-none">&middot;</span>
+          <a href="/api/schema" className="hover:text-slate-600 transition-colors font-mono">
+            /api/schema
+          </a>
+          <span className="select-none">&middot;</span>
+          <a href="/.well-known/onlybots.json" className="hover:text-slate-600 transition-colors font-mono">
+            /.well-known/onlybots.json
+          </a>
+          <span className="select-none">&middot;</span>
+          <Link href="/methodology" className="hover:text-slate-600 transition-colors">
+            Methodology
+          </Link>
+        </div>
+      </section>
     </div>
   );
 }

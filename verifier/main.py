@@ -1,0 +1,156 @@
+"""OnlyBots Verifier — main polling loop.
+
+Polls the database for verification runs with status='running',
+executes three sequential tests using CLI agent harnesses, and records results.
+
+Usage:
+    python main.py              # poll mode (runs forever)
+    python main.py --once       # run once and exit (for manual/cron)
+    python main.py --retry-failed  # re-queue failed services and run once
+"""
+from __future__ import annotations
+import asyncio
+import shutil
+import sys
+import time
+import traceback
+from datetime import datetime, timezone
+
+from config import POLL_INTERVAL_SECONDS, VERIFIER_VERSION, HARNESSES
+from db import (
+    fetch_pending_runs, save_test_result, complete_run,
+    update_service_status, retry_failed_services,
+)
+from evidence import get_evidence_dir
+from tests.test_signup import TestSignup
+from tests.test_persistence import TestPersistence
+from tests.test_workflow import TestWorkflow
+
+
+TESTS = [TestSignup(), TestPersistence(), TestWorkflow()]
+
+
+async def verify_service(run: dict) -> None:
+    """Run all three tests sequentially for a single service."""
+    run_id = run["id"]
+    service_id = run["service_id"]
+
+    print(f"[verifier] Starting verification for {run['name']} (run {run_id})")
+
+    evidence_dir = get_evidence_dir(run_id)
+    state: dict = {}  # shared state across tests (credentials, tokens, etc.)
+    failed_at_step: int | None = None
+
+    for test in TESTS:
+        print(f"  Running Test {test.test_number}: {test.test_name}...")
+
+        try:
+            result = await test.run(run, state, run_id)
+        except Exception as e:
+            traceback.print_exc()
+            result = None
+
+        if result is None:
+            save_test_result(
+                run_id=run_id,
+                test_number=test.test_number,
+                test_name=test.test_name,
+                passed=False,
+                confidence=0.0,
+                failure_reason="Unhandled exception in test",
+            )
+            failed_at_step = test.test_number
+            print(f"  Test {test.test_number}: EXCEPTION")
+            break
+
+        save_test_result(
+            run_id=run_id,
+            test_number=test.test_number,
+            test_name=test.test_name,
+            passed=result.passed,
+            confidence=result.confidence,
+            failure_reason=result.failure_reason,
+            evidence_artifacts=result.evidence_artifacts,
+            details=result.details,
+        )
+
+        if result.passed:
+            print(f"  Test {test.test_number}: PASS (confidence: {result.confidence:.0%})")
+        else:
+            print(f"  Test {test.test_number}: FAIL — {result.failure_reason}")
+            failed_at_step = test.test_number
+            break
+
+    if failed_at_step is None:
+        verified_date = datetime.now(timezone.utc).isoformat()
+        update_service_status(service_id, "verified", None, verified_date)
+        complete_run(run_id, "passed", str(evidence_dir))
+        print(f"[verifier] {run['name']}: VERIFIED ✓")
+    else:
+        update_service_status(service_id, "failed", failed_at_step, None)
+        complete_run(run_id, "failed", str(evidence_dir))
+        print(f"[verifier] {run['name']}: FAILED at step {failed_at_step} ✗")
+
+
+async def poll_once() -> int:
+    runs = fetch_pending_runs()
+    if not runs:
+        return 0
+    print(f"[verifier] Found {len(runs)} pending run(s)")
+    for run in runs:
+        await verify_service(run)
+    return len(runs)
+
+
+async def poll_loop() -> None:
+    print(f"[verifier] OnlyBots Verifier v{VERIFIER_VERSION}")
+    print(f"[verifier] Polling every {POLL_INTERVAL_SECONDS}s...")
+    while True:
+        try:
+            count = await poll_once()
+            if count > 0:
+                print(f"[verifier] Processed {count} run(s)")
+        except KeyboardInterrupt:
+            print("\n[verifier] Shutting down...")
+            break
+        except Exception:
+            traceback.print_exc()
+            print("[verifier] Error in poll cycle, retrying...")
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+
+def check_harnesses():
+    """Check which CLI agent harnesses are installed."""
+    print("[verifier] Checking installed harnesses:")
+    for name, cfg in HARNESSES.items():
+        cmd = cfg["cmd"]
+        found = shutil.which(cmd)
+        key_set = "✓" if cfg["api_key"] else "✗"
+        if found:
+            print(f"  {name:12s} {cmd:12s} installed ✓  key {key_set}")
+        else:
+            print(f"  {name:12s} {cmd:12s} NOT FOUND ✗  key {key_set}")
+
+
+def main():
+    check_harnesses()
+    print()
+
+    retry = "--retry-failed" in sys.argv
+    once = "--once" in sys.argv or retry
+
+    if retry:
+        print("[verifier] Re-queuing failed services...")
+        count = retry_failed_services()
+        print(f"[verifier] Re-queued {count} service(s)")
+
+    if once:
+        print("[verifier] Running single poll...")
+        count = asyncio.run(poll_once())
+        print(f"[verifier] Done. Processed {count} run(s).")
+    else:
+        asyncio.run(poll_loop())
+
+
+if __name__ == "__main__":
+    main()
