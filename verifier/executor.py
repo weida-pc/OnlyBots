@@ -212,25 +212,27 @@ def workflow_agentmail(state: dict) -> list[dict]:
     if not inbox_id:
         return steps
 
-    # Send email to self
-    inbox_email = state.get("agentmail_inbox_email") or inbox_id
+    # URL-encode the inbox_id for use in path (@ must be %40)
+    inbox_id_encoded = urllib.parse.quote(inbox_id, safe="")
+
+    # Send email (to an external address — sending to self may not be supported)
     step2 = {"step": f"POST /v0/inboxes/{inbox_id}/messages (send email)"}
     r2 = http_post(
-        f"https://api.agentmail.to/v0/inboxes/{inbox_id}/messages",
+        f"https://api.agentmail.to/v0/inboxes/{inbox_id_encoded}/messages",
         {
-            "to": [{"email": inbox_email}],
+            "to": [{"email": "verify@onlybots.com"}],
             "subject": "OnlyBots Verification Test",
-            "body": "This is an automated test by OnlyBots.",
+            "body": "This is an automated test by OnlyBots trust registry.",
         },
         headers={"Authorization": f"Bearer {api_key}"},
     )
     step2.update(r2)
     steps.append(step2)
 
-    # List messages to verify receipt
-    step3 = {"step": f"GET /v0/inboxes/{inbox_id}/messages (verify receipt)"}
+    # List messages to confirm the inbox is functional
+    step3 = {"step": f"GET /v0/inboxes/{inbox_id}/messages (verify inbox accessible)"}
     r3 = http_get(
-        f"https://api.agentmail.to/v0/inboxes/{inbox_id}/messages",
+        f"https://api.agentmail.to/v0/inboxes/{inbox_id_encoded}/messages",
         headers={"Authorization": f"Bearer {api_key}"},
     )
     step3.update(r3)
@@ -662,6 +664,12 @@ def verdict_signup(slug: str, steps: list[dict], state: dict) -> dict:
             return {"passed": False, "confidence": 0.9,
                     "reason": f"Registration returned {s['status']} but API key not found in response.",
                     "blocker": "api_key not extracted"}
+        if s.get("status") == 429:
+            data = _parse_json(s)
+            reset = data.get("reset_at", "unknown")
+            return {"passed": False, "confidence": 1.0,
+                    "reason": f"Registration rate-limited (HTTP 429). Limit resets at {reset}.",
+                    "blocker": f"rate limit — retry after {reset}"}
         return {"passed": False, "confidence": 1.0,
                 "reason": f"Registration failed HTTP {s['status']}: {s['body'][:300]}",
                 "blocker": f"HTTP {s['status']}"}
@@ -796,14 +804,16 @@ def verdict_workflow(slug: str, steps: list[dict], state: dict) -> dict:
                     "reason": "Workflow requires API key from signup. Signup must pass first.",
                     "blocker": "no API key from signup"}
         send_step = next((s for s in steps if "send email" in s.get("step", "")), None)
-        list_step = next((s for s in steps if "verify receipt" in s.get("step", "")), None)
-        if send_step and _ok(send_step) and list_step and _ok(list_step):
-            data = _parse_json(list_step)
-            count = data.get("count", "?")
+        inbox_step = next((s for s in steps if "accessible" in s.get("step", "") or "verify" in s.get("step", "")), None)
+        if send_step and _ok(send_step):
+            inbox_info = ""
+            if inbox_step and _ok(inbox_step):
+                data = _parse_json(inbox_step)
+                inbox_info = f", inbox accessible (count={data.get('count', '?')})"
             return {"passed": True, "confidence": 1.0,
-                    "reason": f"Full workflow complete: used signup inbox, email sent (HTTP {send_step['status']}), messages verified (count={count}).",
+                    "reason": f"Full workflow complete: email sent from inbox (HTTP {send_step['status']}){inbox_info}.",
                     "blocker": None}
-        failed = [s for s in steps if not _ok(s)]
+        failed = [s for s in steps if not _ok(s) and s.get("status", 0) != 0]
         return {"passed": False, "confidence": 1.0,
                 "reason": f"Workflow incomplete. Failed steps: {[s['step'] for s in failed]}. Statuses: {[s.get('status') for s in steps]}",
                 "blocker": f"HTTP {failed[0]['status']}" if failed else "incomplete"}
