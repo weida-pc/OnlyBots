@@ -138,7 +138,7 @@ def signup_agentmail(state: dict) -> list[dict]:
     step = {"step": "POST https://api.agentmail.to/v0/agent/sign-up"}
     resp = http_post(
         "https://api.agentmail.to/v0/agent/sign-up",
-        {"human_email": "onlybots-verify@agentmail.to", "username": f"onlybots-test-{ts}"},
+        {"human_email": "sudo@pressclub.app", "username": f"onlybots-test-{ts}"},
     )
     step.update(resp)
 
@@ -216,7 +216,7 @@ def workflow_agentmail(state: dict) -> list[dict]:
     inbox_id_encoded = urllib.parse.quote(inbox_id, safe="")
 
     # Send email to the human_email from signup (it's pre-allowed in the send allow list)
-    human_email = "onlybots-verify@agentmail.to"
+    human_email = "sudo@pressclub.app"
     step2 = {"step": f"POST /v0/inboxes/{inbox_id}/messages/send (send email)"}
     r2 = http_post(
         f"https://api.agentmail.to/v0/inboxes/{inbox_id_encoded}/messages/send",
