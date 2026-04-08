@@ -6,113 +6,65 @@ AI never needs to browse the web, only interpret pre-fetched responses.
 """
 from __future__ import annotations
 
+import http.client
 import json
+import os
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any
 
 
 # ── Low-level HTTP helpers ───────────────────────────────────────────────────
+
+def _http_request(method: str, url: str, body: bytes | None = None,
+                   headers: dict | None = None, timeout: int = 30) -> dict:
+    """Low-level HTTP request using http.client — preserves header case exactly."""
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+
+    t0 = time.time()
+    try:
+        cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+        conn = cls(host, timeout=timeout)
+        conn.request(method, path, body=body, headers=headers or {})
+        resp = conn.getresponse()
+        body_str = resp.read().decode("utf-8", errors="replace")
+        return {
+            "status": resp.status,
+            "body": body_str,
+            "elapsed_ms": round((time.time() - t0) * 1000),
+            "error": None,
+        }
+    except Exception as e:
+        return {
+            "status": 0,
+            "body": "",
+            "elapsed_ms": round((time.time() - t0) * 1000),
+            "error": str(e),
+        }
+
 
 def http_post(url: str, body: dict, headers: dict | None = None, timeout: int = 30) -> dict:
     data = json.dumps(body).encode("utf-8")
     req_headers = {"Content-Type": "application/json"}
     if headers:
         req_headers.update(headers)
-
-    req = urllib.request.Request(url, data=data, headers=req_headers, method="POST")
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body_str = resp.read().decode("utf-8", errors="replace")
-            return {
-                "status": resp.status,
-                "body": body_str,
-                "elapsed_ms": round((time.time() - t0) * 1000),
-                "error": None,
-            }
-    except urllib.error.HTTPError as e:
-        body_str = e.read().decode("utf-8", errors="replace")
-        return {
-            "status": e.code,
-            "body": body_str,
-            "elapsed_ms": round((time.time() - t0) * 1000),
-            "error": str(e),
-        }
-    except Exception as e:
-        return {
-            "status": 0,
-            "body": "",
-            "elapsed_ms": round((time.time() - t0) * 1000),
-            "error": str(e),
-        }
+    return _http_request("POST", url, body=data, headers=req_headers, timeout=timeout)
 
 
 def http_get(url: str, headers: dict | None = None, timeout: int = 30) -> dict:
-    req = urllib.request.Request(url, headers=headers or {}, method="GET")
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body_str = resp.read().decode("utf-8", errors="replace")
-            return {
-                "status": resp.status,
-                "body": body_str,
-                "elapsed_ms": round((time.time() - t0) * 1000),
-                "error": None,
-            }
-    except urllib.error.HTTPError as e:
-        body_str = e.read().decode("utf-8", errors="replace")
-        return {
-            "status": e.code,
-            "body": body_str,
-            "elapsed_ms": round((time.time() - t0) * 1000),
-            "error": str(e),
-        }
-    except Exception as e:
-        return {
-            "status": 0,
-            "body": body_str if "body_str" in dir() else "",
-            "elapsed_ms": round((time.time() - t0) * 1000),
-            "error": str(e),
-        }
+    return _http_request("GET", url, headers=headers, timeout=timeout)
 
 
 def http_put(url: str, body: str | bytes, content_type: str = "application/octet-stream",
              timeout: int = 60) -> dict:
     if isinstance(body, str):
         body = body.encode("utf-8")
-    req = urllib.request.Request(
-        url, data=body,
-        headers={"Content-Type": content_type},
-        method="PUT"
-    )
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body_str = resp.read().decode("utf-8", errors="replace")
-            return {
-                "status": resp.status,
-                "body": body_str,
-                "elapsed_ms": round((time.time() - t0) * 1000),
-                "error": None,
-            }
-    except urllib.error.HTTPError as e:
-        body_str = e.read().decode("utf-8", errors="replace")
-        return {
-            "status": e.code,
-            "body": body_str,
-            "elapsed_ms": round((time.time() - t0) * 1000),
-            "error": str(e),
-        }
-    except Exception as e:
-        return {
-            "status": 0,
-            "body": "",
-            "elapsed_ms": round((time.time() - t0) * 1000),
-            "error": str(e),
-        }
+    return _http_request("PUT", url, body=body,
+                          headers={"Content-Type": content_type}, timeout=timeout)
 
 
 def format_steps(steps: list[dict]) -> str:
@@ -436,100 +388,109 @@ def workflow_moltbook(state: dict) -> list[dict]:
 
 
 def signup_signbee(state: dict) -> list[dict]:
-    """Test Signbee document sending."""
-    steps = []
+    """Send a document via Signbee using pre-provisioned API key."""
+    api_key = os.environ.get("SIGNBEE_API_KEY", state.get("signbee_api_key", ""))
+    if api_key:
+        state["signbee_api_key"] = api_key
 
-    # Check API signup endpoint
-    step1 = {"step": "GET https://signb.ee/api/v1/auth/signup (probe endpoint)"}
-    r1 = http_get("https://signb.ee/api/v1/auth/signup")
-    step1.update(r1)
-    steps.append(step1)
+    step = {"step": "POST https://signb.ee/api/v1/send (send document with API key)"}
+    payload: dict = {
+        "recipient_name": "OnlyBots Verifier",
+        "recipient_email": "sudo@pressclub.app",
+        "markdown": (
+            "# OnlyBots Verification Document\n\n"
+            "This document verifies that Signbee supports autonomous document workflows "
+            "for AI agents registered in the OnlyBots trust registry.\n\n"
+            "## Scope\n\nThis is an automated verification-only test document."
+        ),
+    }
+    if api_key:
+        headers = {"Authorization": f"Bearer {api_key}"}
+    else:
+        # Without API key, sender must verify via email OTP — include sender fields
+        payload["sender_name"] = "OnlyBots Verifier"
+        payload["sender_email"] = "sudo@pressclub.app"
+        headers = None
 
-    # Send a document without auth to see the flow
-    step2 = {"step": "POST https://signb.ee/api/v1/send (send document)"}
-    r2 = http_post(
-        "https://signb.ee/api/v1/send",
-        {
-            "recipient_name": "OnlyBots Verifier",
-            "recipient_email": "verify@onlybots.com",
-            "markdown": (
-                "# OnlyBots Verification Document\n\n"
-                "This document verifies that Signbee supports autonomous document signing.\n\n"
-                "## Terms\n\n- This is an automated test\n- No real agreement is being made"
-            ),
-        },
-    )
-    step2.update(r2)
-    steps.append(step2)
+    resp = http_post("https://signb.ee/api/v1/send", payload, headers=headers)
+    step.update(resp)
 
-    # Extract document_id if present
     try:
-        data = json.loads(r2["body"])
+        data = json.loads(resp["body"])
         doc_id = data.get("document_id") or data.get("id")
         if doc_id:
             state["signbee_document_id"] = doc_id
-        api_key = data.get("api_key")
-        if api_key:
-            state["signbee_api_key"] = api_key
+    except Exception:
+        pass
+
+    return [step]
+
+
+def persist_signbee(state: dict) -> list[dict]:
+    """Verify Signbee API key still works by checking document status."""
+    api_key = state.get("signbee_api_key", os.environ.get("SIGNBEE_API_KEY", ""))
+    doc_id = state.get("signbee_document_id", "")
+
+    if api_key and doc_id:
+        step = {"step": f"GET /api/v1/documents/{doc_id} (check document status)"}
+        resp = http_get(f"https://signb.ee/api/v1/documents/{doc_id}",
+                        headers={"Authorization": f"Bearer {api_key}"})
+        step.update(resp)
+        return [step]
+
+    if api_key:
+        # No doc_id — send a second document to prove persistence
+        step = {"step": "POST /api/v1/send (2nd send — verify key still works)"}
+        resp = http_post(
+            "https://signb.ee/api/v1/send",
+            {
+                "recipient_name": "OnlyBots Persistence Check",
+                "recipient_email": "sudo@pressclub.app",
+                "markdown": "# Persistence Check\n\nVerifying API key still works after initial signup.",
+            },
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        step.update(resp)
+        return [step]
+
+    return [{"step": "persist check skipped — no API key", "status": 0, "body": "",
+             "elapsed_ms": 0, "error": "No API key"}]
+
+
+def workflow_signbee(state: dict) -> list[dict]:
+    """Full Signbee workflow — send document and verify it was created."""
+    return signup_signbee(state)
+
+
+def signup_browseruse(state: dict) -> list[dict]:
+    """Verify Browser Use API key works and list sessions."""
+    api_key = os.environ.get("BROWSER_USE_API_KEY", state.get("browseruse_api_key", ""))
+    if api_key:
+        state["browseruse_api_key"] = api_key
+
+    steps = []
+    headers = {"X-Browser-Use-API-Key": api_key} if api_key else {}
+
+    # 1. List sessions to verify auth
+    step1 = {"step": "GET https://api.browser-use.com/api/v3/sessions (verify API key)"}
+    r1 = http_get("https://api.browser-use.com/api/v3/sessions", headers=headers or None)
+    step1.update(r1)
+    steps.append(step1)
+
+    # Extract session count
+    try:
+        data = json.loads(r1["body"])
+        state["browseruse_session_count"] = data.get("total", 0)
     except Exception:
         pass
 
     return steps
 
 
-def persist_signbee(state: dict) -> list[dict]:
-    """Check Signbee document status."""
-    steps = []
-    api_key = state.get("signbee_api_key", "")
-    doc_id = state.get("signbee_document_id", "")
-
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-
-    if doc_id:
-        step = {"step": f"GET /api/v1/documents/{doc_id} (check status)"}
-        resp = http_get(f"https://signb.ee/api/v1/documents/{doc_id}", headers=headers or None)
-        step.update(resp)
-        steps.append(step)
-    else:
-        step = {"step": "GET /api/v1/documents (list — no doc_id from signup)"}
-        resp = http_get("https://signb.ee/api/v1/documents", headers=headers or None)
-        step.update(resp)
-        steps.append(step)
-
-    return steps
-
-
-def workflow_signbee(state: dict) -> list[dict]:
-    """Full Signbee workflow — same as signup for doc-based service."""
-    return signup_signbee(state)
-
-
-def signup_browseruse(state: dict) -> list[dict]:
-    """Probe Browser Use API authentication requirements."""
-    steps = []
-
-    # 1. Try creating a session without auth
-    step1 = {"step": "POST https://api.browser-use.com/api/v3/sessions (no auth)"}
-    r1 = http_post(
-        "https://api.browser-use.com/api/v3/sessions",
-        {"task": "Navigate to https://example.com and return the page title"},
-    )
-    step1.update(r1)
-    steps.append(step1)
-
-    # 2. List sessions without auth
-    step2 = {"step": "GET https://api.browser-use.com/api/v3/sessions (check auth)"}
-    r2 = http_get("https://api.browser-use.com/api/v3/sessions")
-    step2.update(r2)
-    steps.append(step2)
-
-    return steps
-
-
 def persist_browseruse(state: dict) -> list[dict]:
-    """Check Browser Use session persistence."""
-    api_key = state.get("browseruse_api_key", "")
-    step = {"step": "GET /api/v3/sessions (check auth requirement)"}
+    """Check Browser Use API key still valid."""
+    api_key = state.get("browseruse_api_key", os.environ.get("BROWSER_USE_API_KEY", ""))
+    step = {"step": "GET /api/v3/sessions (verify key persists)"}
     headers = {"X-Browser-Use-API-Key": api_key} if api_key else {}
     resp = http_get("https://api.browser-use.com/api/v3/sessions", headers=headers or None)
     step.update(resp)
@@ -537,8 +498,43 @@ def persist_browseruse(state: dict) -> list[dict]:
 
 
 def workflow_browseruse(state: dict) -> list[dict]:
-    """Browser Use workflow — same as signup probe."""
-    return signup_browseruse(state)
+    """Browser Use workflow — create a browser automation task."""
+    api_key = state.get("browseruse_api_key", os.environ.get("BROWSER_USE_API_KEY", ""))
+    if not api_key:
+        return [{"step": "workflow skipped — no API key", "status": 0, "body": "",
+                 "elapsed_ms": 0, "error": "No API key"}]
+
+    headers = {"X-Browser-Use-API-Key": api_key}
+    steps = []
+
+    # Create a browser session with a simple task
+    step1 = {"step": "POST /api/v3/sessions (create browser automation task)"}
+    r1 = http_post(
+        "https://api.browser-use.com/api/v3/sessions",
+        {"task": "Navigate to https://example.com and return the page title"},
+        headers=headers,
+    )
+    step1.update(r1)
+    steps.append(step1)
+
+    # Extract session_id
+    session_id = None
+    try:
+        data = json.loads(r1["body"])
+        session_id = data.get("id") or data.get("session_id")
+        if session_id:
+            state["browseruse_session_id"] = session_id
+    except Exception:
+        pass
+
+    if session_id:
+        # Check session status
+        step2 = {"step": f"GET /api/v3/sessions/{session_id} (check task started)"}
+        r2 = http_get(f"https://api.browser-use.com/api/v3/sessions/{session_id}", headers=headers)
+        step2.update(r2)
+        steps.append(step2)
+
+    return steps
 
 
 # ── Dispatcher ───────────────────────────────────────────────────────────────
@@ -682,28 +678,39 @@ def verdict_signup(slug: str, steps: list[dict], state: dict) -> dict:
         if _ok(send_step):
             data = _parse_json(send_step)
             doc_id = data.get("document_id") or data.get("id")
-            return {"passed": True, "confidence": 1.0,
-                    "reason": f"Document sent (HTTP {send_step['status']}). document_id={doc_id}",
+            status = data.get("status", "?")
+            if status == "pending_recipient":
+                return {"passed": True, "confidence": 1.0,
+                        "reason": f"Document sent with API key (HTTP {send_step['status']}). document_id={doc_id}, status=pending_recipient. Recipient will receive signing email immediately.",
+                        "blocker": None}
+            if status == "pending_sender":
+                return {"passed": False, "confidence": 1.0,
+                        "reason": f"Document created (HTTP {send_step['status']}) but requires sender email verification (status=pending_sender). API key not recognized or not provided.",
+                        "blocker": "sender email verification required — API key not working"}
+            return {"passed": True, "confidence": 0.9,
+                    "reason": f"Document created (HTTP {send_step['status']}). document_id={doc_id}, status={status}",
                     "blocker": None}
         body = send_step.get("body", "")
-        if "api_key" in body.lower() or "api key" in body.lower():
-            return {"passed": False, "confidence": 1.0,
-                    "reason": f"Sending documents requires an API key (HTTP {send_step['status']}). No programmatic signup endpoint found.",
-                    "blocker": "API key required — no programmatic signup endpoint"}
         return {"passed": False, "confidence": 1.0,
                 "reason": f"Document send failed HTTP {send_step['status']}: {body[:200]}",
                 "blocker": f"HTTP {send_step['status']}"}
 
     elif slug == "browser-use":
-        for s in steps:
-            if _ok(s):
-                return {"passed": True, "confidence": 0.8,
-                        "reason": f"API accessible without auth (HTTP {s['status']})",
-                        "blocker": None}
+        s = steps[0] if steps else {}
+        if _ok(s):
+            data = _parse_json(s)
+            total = data.get("total", 0)
+            return {"passed": True, "confidence": 1.0,
+                    "reason": f"API key valid (HTTP {s['status']}). Sessions accessible, total={total}.",
+                    "blocker": None}
         statuses = [s.get("status", 0) for s in steps]
+        if not state.get("browseruse_api_key"):
+            return {"passed": False, "confidence": 1.0,
+                    "reason": f"No BROWSER_USE_API_KEY in environment. Statuses: {statuses}.",
+                    "blocker": "no API key — requires account creation via browser"}
         return {"passed": False, "confidence": 1.0,
-                "reason": f"API requires authentication for all endpoints. Statuses: {statuses}. No programmatic signup found.",
-                "blocker": "no programmatic signup — requires browser-based account creation"}
+                "reason": f"API key rejected. Statuses: {statuses}: {s.get('body', '')[:200]}",
+                "blocker": f"HTTP {statuses[0] if statuses else 0}"}
 
     # Generic fallback
     all_ok = all(_ok(s) for s in steps)
@@ -767,9 +774,16 @@ def verdict_persist(slug: str, steps: list[dict], state: dict) -> dict:
     elif slug == "signbee":
         s = steps[0]
         if _ok(s):
+            data = _parse_json(s)
+            doc_status = data.get("status", "?")
+            doc_id = data.get("document_id") or data.get("id", "?")
             return {"passed": True, "confidence": 1.0,
-                    "reason": f"Document/credential accessible (HTTP {s['status']})",
+                    "reason": f"API key valid (HTTP {s['status']}). Document accessible: id={doc_id}, status={doc_status}.",
                     "blocker": None}
+        if s.get("error") == "No API key":
+            return {"passed": False, "confidence": 1.0,
+                    "reason": "No SIGNBEE_API_KEY available to test persistence.",
+                    "blocker": "no API key"}
         return {"passed": False, "confidence": 1.0,
                 "reason": f"HTTP {s['status']}: {s['body'][:200]}",
                 "blocker": f"HTTP {s['status']}"}
@@ -777,13 +791,15 @@ def verdict_persist(slug: str, steps: list[dict], state: dict) -> dict:
     elif slug == "browser-use":
         s = steps[0]
         if _ok(s):
-            return {"passed": True, "confidence": 0.8,
-                    "reason": f"API key valid (HTTP {s['status']})",
+            data = _parse_json(s)
+            total = data.get("total", 0)
+            return {"passed": True, "confidence": 1.0,
+                    "reason": f"API key persists (HTTP {s['status']}). Sessions: total={total}.",
                     "blocker": None}
         if not state.get("browseruse_api_key"):
             return {"passed": False, "confidence": 1.0,
-                    "reason": "No API key from signup (no programmatic signup available).",
-                    "blocker": "no credentials from signup"}
+                    "reason": "No BROWSER_USE_API_KEY available to test persistence.",
+                    "blocker": "no API key"}
         return {"passed": False, "confidence": 1.0,
                 "reason": f"HTTP {s['status']}: {s['body'][:200]}",
                 "blocker": f"HTTP {s['status']}"}
@@ -841,8 +857,30 @@ def verdict_workflow(slug: str, steps: list[dict], state: dict) -> dict:
                 "reason": f"Workflow partial. Step statuses: {statuses}",
                 "blocker": "workflow steps failed"}
 
-    elif slug in ("signbee", "browser-use"):
+    elif slug == "signbee":
         return verdict_signup(slug, steps, state)
+
+    elif slug == "browser-use":
+        if steps[0].get("error") == "No API key":
+            return {"passed": False, "confidence": 1.0,
+                    "reason": "No BROWSER_USE_API_KEY in environment.",
+                    "blocker": "no API key"}
+        create_step = next((s for s in steps if "create browser" in s.get("step", "")), None)
+        status_step = next((s for s in steps if "check task" in s.get("step", "")), None)
+        if create_step and _ok(create_step):
+            data = _parse_json(create_step)
+            session_id = data.get("id") or data.get("session_id", "?")
+            status_info = ""
+            if status_step and _ok(status_step):
+                sd = _parse_json(status_step)
+                status_info = f", task status={sd.get('status', '?')}"
+            return {"passed": True, "confidence": 1.0,
+                    "reason": f"Browser automation task created (HTTP {create_step['status']}). session_id={session_id}{status_info}.",
+                    "blocker": None}
+        statuses = {s["step"]: s.get("status") for s in steps}
+        return {"passed": False, "confidence": 1.0,
+                "reason": f"Workflow failed. Statuses: {statuses}",
+                "blocker": "task creation failed"}
 
     all_ok = all(_ok(s) for s in steps)
     return {"passed": all_ok, "confidence": 0.7,
