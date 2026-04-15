@@ -14,10 +14,28 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const BASE_URL =
+  process.env.NEXT_PUBLIC_BASE_URL || "http://34-28-191-224.sslip.io";
+
 export const metadata: Metadata = {
+  metadataBase: new URL(BASE_URL),
   title: "OnlyBots — Trust Registry for Agent-First Services",
   description:
     "Verified directory of services AI agents can autonomously sign up for, own, and operate.",
+  openGraph: {
+    title: "OnlyBots — Trust Registry for Agent-First Services",
+    description:
+      "Verified directory of services AI agents can autonomously sign up for, own, and operate.",
+    url: BASE_URL,
+    siteName: "OnlyBots",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "OnlyBots — Trust Registry for Agent-First Services",
+    description:
+      "Verified directory of services AI agents can autonomously sign up for, own, and operate.",
+  },
 };
 
 export default function RootLayout({

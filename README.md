@@ -1,36 +1,135 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# OnlyBots — Trust Registry for Agent-First Services
 
-## Getting Started
+A public registry that tests and publishes whether third-party services can be fully operated by autonomous AI agents — without any human in the loop.
 
-First, run the development server:
+Live: **http://34-28-191-224.sslip.io**
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+---
+
+## What It Does
+
+OnlyBots runs automated verifications against submitted services to answer three questions:
+
+1. **Autonomous signup** — Can an AI agent create an account via API/form without CAPTCHA, phone verification, or manual approval?
+2. **Persistent account ownership** — Can the agent authenticate and prove ownership on a return visit?
+3. **Core workflow autonomy** — Can the agent complete the primary service workflow end-to-end via API?
+
+Services that pass all three tests earn **Verified** status. Failures are published with the specific blocker so developers know exactly what to fix.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│  Next.js frontend (App Router)              │
+│  app/  components/  lib/                    │
+└───────────────────┬─────────────────────────┘
+                    │ reads
+┌───────────────────▼─────────────────────────┐
+│  PostgreSQL  (onlybots DB)                  │
+│  services · verification_runs · test_results│
+└───────────────────▲─────────────────────────┘
+                    │ writes
+┌───────────────────┴─────────────────────────┐
+│  Python verifier  (verifier/)               │
+│  executor.py · harness.py · tests/          │
+│  Runs via onlybots-verifier.service         │
+└─────────────────────────────────────────────┘
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Deployed on a single GCP VM (`34.28.191.224`). Frontend is served by Next.js standalone build behind nginx. Verifier runs as a systemd service, polling the DB for pending jobs.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## API
 
-## Learn More
+All endpoints return JSON. No authentication required for reads.
 
-To learn more about Next.js, take a look at the following resources:
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/services` | List all services. Supports `?q=`, `?status=`, `?category=` |
+| GET | `/api/services/{slug}` | Single service with full verification history |
+| POST | `/api/services/submit` | Submit a new service for verification |
+| GET | `/api/schema` | JSON Schema for the submission payload |
+| GET | `/api/methodology` | Verification methodology in machine-readable JSON |
+| GET | `/.well-known/onlybots.json` | Registry discovery endpoint |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Full docs: `http://34-28-191-224.sslip.io/api-docs`
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+## Verifier
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The verifier is a Python service in `verifier/`. It uses the Gemini CLI as its agent harness.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```
+verifier/
+  executor.py          # orchestrates runs, pulls pending services from DB
+  harness.py           # wraps Gemini CLI, parses structured output
+  tests/
+    test_signup.py     # Test 1: autonomous signup
+    test_persistence.py # Test 2: account ownership
+    test_workflow.py   # Test 3: core workflow
+```
+
+Each test calls `harness.py` with a prompt, which shells out to:
+```
+gemini -m gemini-2.5-pro-preview-03-25 -p "<prompt>"
+```
+
+Results are parsed for `passed`, `confidence`, `reason`, and `blocker`, then written to `test_results` and `verification_runs` tables.
+
+### Pre-provisioned keys
+
+Some services require a one-time human setup step before the agent can operate autonomously. For these, API keys are stored in `/opt/onlybots/verifier/.env` on the VM:
+
+```
+MOLTBOOK_API_KEY=...   # pre-claimed Moltbook agent key
+```
+
+The verifier loads this key instead of registering a fresh agent, so the workflow test reflects true autonomous operation after initial setup.
+
+---
+
+## Local Development
+
+```bash
+npm install
+npm run dev
+```
+
+Requires a local PostgreSQL database. Copy `.env.example` to `.env.local` and set `DATABASE_URL`.
+
+### Database schema
+
+```bash
+psql $DATABASE_URL < schema.sql
+```
+
+---
+
+## Deployment
+
+Build and copy to VM:
+
+```bash
+npm run build
+tar -czf onlybots-frontend.tar.gz .next/standalone .next/static public
+scp onlybots-frontend.tar.gz t@34.28.191.224:/opt/onlybots/
+ssh t@34.28.191.224 "cd /opt/onlybots && tar -xzf onlybots-frontend.tar.gz && sudo systemctl restart onlybots-frontend"
+```
+
+Verifier is managed via:
+
+```bash
+sudo systemctl status onlybots-verifier
+sudo systemctl restart onlybots-verifier
+journalctl -u onlybots-verifier -f
+```
+
+---
+
+## License
+
+MIT

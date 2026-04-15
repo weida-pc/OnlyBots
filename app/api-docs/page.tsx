@@ -115,25 +115,25 @@ export default function ApiDocsPage() {
             description: "Filter by status: verified, failed, or pending.",
           },
         ]}
-        curl={`curl https://onlybots.dev/api/services
-curl "https://onlybots.dev/api/services?status=verified&category=Hosting"`}
+        curl={`curl http://34-28-191-224.sslip.io/api/services
+curl "http://34-28-191-224.sslip.io/api/services?status=verified&category=Communication"`}
         response={`[
   {
     "id": 1,
-    "slug": "acme-hosting",
-    "name": "Acme Hosting",
-    "url": "https://acme.example.com",
-    "signup_url": "https://acme.example.com/signup",
-    "category": "Hosting",
-    "description": "Serverless hosting with a fully autonomous API.",
-    "core_workflow": "Create project, deploy, retrieve endpoint.",
-    "docs_url": "https://docs.acme.example.com",
-    "pricing_url": "https://acme.example.com/pricing",
+    "slug": "agentmail-to",
+    "name": "AgentMail",
+    "url": "https://agentmail.to",
+    "signup_url": "https://agentmail.to/signup",
+    "category": "Communication",
+    "description": "Programmable email inboxes for AI agents — create, send, and receive via REST API.",
+    "core_workflow": "POST /inboxes to create inbox, POST /inboxes/{inbox}/messages to send, GET /inboxes/{inbox}/messages to receive.",
+    "docs_url": "https://docs.agentmail.to",
+    "pricing_url": null,
     "status": "verified",
     "failed_at_step": null,
-    "verified_date": "2025-03-15T00:00:00.000Z",
-    "created_at": "2025-03-01T10:00:00.000Z",
-    "updated_at": "2025-03-15T12:00:00.000Z"
+    "verified_date": "2026-04-06T00:00:00.000Z",
+    "created_at": "2026-04-01T10:00:00.000Z",
+    "updated_at": "2026-04-06T12:00:00.000Z"
   }
 ]`}
       />
@@ -151,29 +151,47 @@ curl "https://onlybots.dev/api/services?status=verified&category=Hosting"`}
             description: "The URL slug of the service.",
           },
         ]}
-        curl={`curl https://onlybots.dev/api/services/acme-hosting`}
+        curl={`curl http://34-28-191-224.sslip.io/api/services/agentmail-to`}
         response={`{
   "id": 1,
-  "slug": "acme-hosting",
-  "name": "Acme Hosting",
+  "slug": "agentmail-to",
+  "name": "AgentMail",
   "status": "verified",
   "verification": {
     "run": {
-      "id": 42,
+      "id": 1,
       "service_id": 1,
-      "started_at": "2025-03-15T11:00:00.000Z",
-      "completed_at": "2025-03-15T11:12:00.000Z",
+      "started_at": "2026-04-06T10:00:00.000Z",
+      "completed_at": "2026-04-06T10:08:00.000Z",
       "status": "passed",
-      "verifier_version": "0.1.0"
+      "verifier_version": "0.3.0"
     },
     "results": [
       {
         "id": 1,
-        "run_id": 42,
+        "run_id": 1,
         "test_number": 1,
         "test_name": "Autonomous signup",
         "passed": true,
+        "confidence": 0.98,
+        "failure_reason": null
+      },
+      {
+        "id": 2,
+        "run_id": 1,
+        "test_number": 2,
+        "test_name": "Persistent account ownership",
+        "passed": true,
         "confidence": 0.97,
+        "failure_reason": null
+      },
+      {
+        "id": 3,
+        "run_id": 1,
+        "test_number": 3,
+        "test_name": "Core workflow autonomy",
+        "passed": true,
+        "confidence": 0.99,
         "failure_reason": null
       }
     ]
@@ -197,23 +215,23 @@ curl "https://onlybots.dev/api/services?status=verified&category=Hosting"`}
           { name: "docs_url", in: "body", required: false, description: "Documentation URL (optional)." },
           { name: "pricing_url", in: "body", required: false, description: "Pricing page URL (optional)." },
         ]}
-        curl={`curl -X POST https://onlybots.dev/api/services/submit \\
+        curl={`curl -X POST http://34-28-191-224.sslip.io/api/services/submit \\
   -H "Content-Type: application/json" \\
   -d '{
-    "name": "Acme Hosting",
-    "url": "https://acme.example.com",
-    "signup_url": "https://acme.example.com/signup",
-    "category": "Hosting",
-    "description": "Serverless hosting with a fully autonomous API.",
-    "core_workflow": "1. POST /accounts to create account\\n2. Retrieve API key\\n3. Deploy via /deployments",
-    "contact_email": "agent@acme.example.com"
+    "name": "My Agent Service",
+    "url": "https://myservice.example.com",
+    "signup_url": "https://myservice.example.com/signup",
+    "category": "Communication",
+    "description": "One-sentence description of what the service does.",
+    "core_workflow": "1. POST /agents to register\\n2. GET /token to retrieve API key\\n3. POST /messages to send",
+    "contact_email": "you@example.com"
   }'`}
         response={`{
-  "id": 1,
-  "slug": "acme-hosting",
-  "name": "Acme Hosting",
+  "id": 7,
+  "slug": "my-agent-service",
+  "name": "My Agent Service",
   "status": "pending",
-  "created_at": "2025-04-05T08:00:00.000Z"
+  "created_at": "2026-04-15T08:00:00.000Z"
 }`}
       />
 
@@ -222,7 +240,7 @@ curl "https://onlybots.dev/api/services?status=verified&category=Hosting"`}
         method="GET"
         path="/api/schema"
         description="Returns the JSON Schema for the service submission payload. Useful for agents that need to construct a valid submission."
-        curl={`curl https://onlybots.dev/api/schema`}
+        curl={`curl http://34-28-191-224.sslip.io/api/schema`}
         response={`{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ServiceSubmission",
@@ -247,7 +265,7 @@ curl "https://onlybots.dev/api/services?status=verified&category=Hosting"`}
         method="GET"
         path="/api/methodology"
         description="Returns the verification methodology in machine-readable JSON format, suitable for agents evaluating whether to submit a service."
-        curl={`curl https://onlybots.dev/api/methodology`}
+        curl={`curl http://34-28-191-224.sslip.io/api/methodology`}
         response={`{
   "version": "0.1.0",
   "tests": [
@@ -265,7 +283,7 @@ curl "https://onlybots.dev/api/services?status=verified&category=Hosting"`}
         method="GET"
         path="/.well-known/onlybots.json"
         description="Discovery endpoint following the well-known URI convention. Returns registry metadata, endpoint locations, and schema references for agents discovering the registry programmatically."
-        curl={`curl https://onlybots.dev/.well-known/onlybots.json`}
+        curl={`curl http://34-28-191-224.sslip.io/.well-known/onlybots.json`}
         response={`{
   "name": "OnlyBots Trust Registry",
   "version": "0.1.0",

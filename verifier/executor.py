@@ -332,8 +332,12 @@ def persist_moltbook(state: dict) -> list[dict]:
 
 
 def workflow_moltbook(state: dict) -> list[dict]:
-    """Create a post, comment, and upvote on Moltbook."""
-    api_key = state.get("moltbook_api_key", "")
+    """Create a post, comment, and upvote on Moltbook.
+
+    Uses MOLTBOOK_API_KEY from env if set (pre-claimed agent) so the workflow
+    test is not blocked by the one-time human claim requirement.
+    """
+    api_key = os.environ.get("MOLTBOOK_API_KEY", state.get("moltbook_api_key", ""))
     if not api_key:
         return [{"step": "workflow skipped — no API key", "status": 0, "body": "", "elapsed_ms": 0, "error": "Missing API key"}]
 

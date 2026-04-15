@@ -3,7 +3,9 @@ import Link from "next/link";
 const footerLinks = [
   { label: "Methodology", href: "/methodology" },
   { label: "API Docs", href: "/api-docs" },
-  { label: "GitHub", href: "#" },
+  { label: "GitHub", href: "https://github.com/weida-pc/OnlyBots" },
+  { label: "Terms", href: "/terms" },
+  { label: "Privacy", href: "/privacy" },
 ];
 
 export default function Footer() {

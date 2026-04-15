@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Service } from "@/lib/types";
 import StatusBadge from "@/components/status-badge";
+import { getServiceRequirements } from "@/lib/service-requirements";
 
 interface ServiceCardProps {
   service: Service;
@@ -16,6 +17,9 @@ function formatVerifiedDate(dateStr: string): string {
 }
 
 export default function ServiceCard({ service }: ServiceCardProps) {
+  const reqs = getServiceRequirements(service.slug);
+  const noHumanNeeded = reqs && !reqs.humanSetup.required;
+
   return (
     <Link
       href={`/services/${service.slug}`}
@@ -37,21 +41,33 @@ export default function ServiceCard({ service }: ServiceCardProps) {
       </p>
 
       {/* Bottom */}
-      <div className="flex items-center gap-3">
-        <StatusBadge
-          status={service.status}
-          failedAtStep={service.failed_at_step}
-        />
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <StatusBadge
+            status={service.status}
+            failedAtStep={service.failed_at_step}
+          />
 
-        {service.status === "verified" && service.verified_date && (
-          <span className="text-xs text-slate-400">
-            Verified {formatVerifiedDate(service.verified_date)}
-          </span>
-        )}
+          {service.status === "verified" && service.verified_date && (
+            <span className="text-xs text-slate-400">
+              Verified {formatVerifiedDate(service.verified_date)}
+            </span>
+          )}
 
-        {service.status === "failed" && service.failed_at_step != null && (
-          <span className="text-xs text-slate-400">
-            Stopped at test {service.failed_at_step}
+          {service.status === "failed" && service.failed_at_step != null && (
+            <span className="text-xs text-slate-400">
+              Stopped at test {service.failed_at_step}
+            </span>
+          )}
+        </div>
+
+        {reqs && (
+          <span className={`shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium ${
+            noHumanNeeded
+              ? "bg-green-50 text-green-700"
+              : "bg-amber-50 text-amber-700"
+          }`}>
+            {noHumanNeeded ? "✓ No human setup" : "⚠ Setup required"}
           </span>
         )}
       </div>

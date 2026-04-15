@@ -5,6 +5,7 @@ import { getServiceBySlug } from "@/lib/db";
 import StatusBadge from "@/components/status-badge";
 import TestResultRow from "@/components/test-result-row";
 import type { VerificationResult } from "@/lib/types";
+import { getServiceRequirements } from "@/lib/service-requirements";
 
 export const dynamic = "force-dynamic";
 
@@ -73,6 +74,7 @@ export default async function ServiceDetailPage({ params }: PageProps) {
 
   const run = service.verification?.run;
   const results = service.verification?.results ?? [];
+  const requirements = getServiceRequirements(slug);
 
   function getResult(testNumber: number): VerificationResult | null {
     return results.find((r) => r.test_number === testNumber) ?? null;
@@ -205,6 +207,134 @@ export default async function ServiceDetailPage({ params }: PageProps) {
               ))}
             </div>
           </div>
+
+          {/* ── Agent Integration Requirements ────────────────────────────── */}
+          {requirements && (
+            <div className="bg-white border border-slate-200 rounded-lg p-6 space-y-6">
+              <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">
+                Agent Integration Requirements
+              </h2>
+
+              {/* Native signup row */}
+              <div className="flex items-start gap-3">
+                <span className={`mt-0.5 shrink-0 text-base ${
+                  requirements.nativeSignup === "yes" ? "text-green-500" :
+                  requirements.nativeSignup === "partial" ? "text-yellow-500" :
+                  "text-red-500"
+                }`}>
+                  {requirements.nativeSignup === "yes" ? "✓" :
+                   requirements.nativeSignup === "partial" ? "◑" : "✗"}
+                </span>
+                <div>
+                  <div className="text-sm font-medium text-slate-700">
+                    {requirements.nativeSignup === "yes"
+                      ? "Native programmatic signup"
+                      : requirements.nativeSignup === "partial"
+                      ? "Partial programmatic signup"
+                      : "No native programmatic signup"}
+                  </div>
+                  <div className="text-xs text-slate-500 mt-0.5">{requirements.nativeSignupNote}</div>
+                </div>
+              </div>
+
+              {/* Human setup */}
+              <div className="flex items-start gap-3">
+                {requirements.humanSetup.required ? (
+                  <>
+                    <span className="mt-0.5 shrink-0 text-base text-yellow-500">⚠</span>
+                    <div>
+                      <div className="text-sm font-medium text-slate-700">Human setup required (one-time)</div>
+                      <ol className="mt-1.5 space-y-1 list-decimal list-inside">
+                        {requirements.humanSetup.steps.map((step, i) => (
+                          <li key={i} className="text-xs text-slate-600">{step}</li>
+                        ))}
+                      </ol>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span className="mt-0.5 shrink-0 text-base text-green-500">✓</span>
+                    <div className="text-sm font-medium text-green-700">No human needed</div>
+                  </>
+                )}
+              </div>
+
+              {/* Inputs table */}
+              <div>
+                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                  Required Inputs
+                </div>
+                <div className="border border-slate-200 rounded-md overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50">
+                      <tr>
+                        <th className="text-left px-3 py-2 font-semibold text-slate-500 w-1/4">Input</th>
+                        <th className="text-left px-3 py-2 font-semibold text-slate-500">Description</th>
+                        <th className="text-left px-3 py-2 font-semibold text-slate-500 w-24">When</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {requirements.inputs.map((input, i) => (
+                        <tr key={i} className="bg-white">
+                          <td className="px-3 py-2 font-mono text-slate-700 align-top">{input.name}</td>
+                          <td className="px-3 py-2 text-slate-600 align-top">{input.description}</td>
+                          <td className="px-3 py-2 align-top">
+                            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              input.when === "pre-setup"
+                                ? "bg-amber-50 text-amber-700"
+                                : "bg-blue-50 text-blue-700"
+                            }`}>
+                              {input.when === "pre-setup" ? "Pre-setup" : "Runtime"}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* API calls */}
+              <div>
+                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">
+                  API Calls Made
+                </div>
+                <div className="border border-slate-200 rounded-md overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50">
+                      <tr>
+                        <th className="text-left px-3 py-2 font-semibold text-slate-500 w-8">#</th>
+                        <th className="text-left px-3 py-2 font-semibold text-slate-500 w-12">Method</th>
+                        <th className="text-left px-3 py-2 font-semibold text-slate-500">Endpoint</th>
+                        <th className="text-left px-3 py-2 font-semibold text-slate-500">Purpose</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {requirements.apiCalls.map((call, i) => (
+                        <tr key={i} className={call.step.includes("human") ? "bg-amber-50" : "bg-white"}>
+                          <td className="px-3 py-2 text-slate-400 align-top">{call.step}</td>
+                          <td className="px-3 py-2 align-top">
+                            {call.method !== "—" ? (
+                              <span className={`font-mono font-semibold ${
+                                call.method === "GET" ? "text-blue-600" :
+                                call.method === "POST" ? "text-green-600" :
+                                call.method === "PUT" ? "text-purple-600" :
+                                "text-slate-500"
+                              }`}>{call.method}</span>
+                            ) : (
+                              <span className="text-amber-600 font-semibold">HUMAN</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-slate-600 break-all align-top">{call.endpoint}</td>
+                          <td className="px-3 py-2 text-slate-600 align-top">{call.purpose}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* ── Reproduce This Verification ───────────────────────────────── */}
           {run && (
