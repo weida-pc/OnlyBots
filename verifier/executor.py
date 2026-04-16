@@ -259,6 +259,8 @@ def signup_herenow(state: dict) -> list[dict]:
         r4 = http_get(site_url)
         step4.update(r4)
         steps.append(step4)
+        # Store result so persistence test can reference it
+        state["herenow_site_live_status"] = r4.get("status", 0)
 
     return steps
 
@@ -752,9 +754,21 @@ def verdict_persist(slug: str, steps: list[dict], state: dict) -> dict:
                     "reason": f"Published site at {site_url} still accessible (HTTP {s['status']}).",
                     "blocker": None}
         if s.get("status") == 403:
-            return {"passed": True, "confidence": 0.8,
-                    "reason": f"Site at {site_url} returns 403 (Cloudflare bot-check blocks Python HTTP client). Site was successfully published — persistence confirmed by publish success.",
-                    "blocker": None}
+            # Cloudflare blocks the Python HTTP client on re-check.
+            # here.now has no account or credentials — persistence means the URL stays live.
+            # Only pass if signup already confirmed the site was accessible (HTTP 200).
+            signup_status = state.get("herenow_site_live_status", 0)
+            if signup_status == 200:
+                return {"passed": True, "confidence": 0.75,
+                        "reason": f"Site at {site_url} confirmed live immediately after publish (HTTP 200 during signup). "
+                                  f"Re-verification blocked by Cloudflare (403). here.now has no account credentials — "
+                                  f"persistence is defined as the URL remaining live, which was confirmed at publish time.",
+                        "blocker": None}
+            return {"passed": False, "confidence": 0.9,
+                    "reason": f"Site at {site_url} returns 403 on re-check (Cloudflare bot-detection). "
+                              f"Signup did not confirm the site was live (signup status: {signup_status}). "
+                              f"Cannot verify persistence.",
+                    "blocker": "Cloudflare bot-detection (403)"}
         return {"passed": False, "confidence": 1.0,
                 "reason": f"Site URL {site_url} returned HTTP {s['status']}",
                 "blocker": f"HTTP {s['status']}"}
