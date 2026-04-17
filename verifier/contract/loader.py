@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .schema import (
-    Contract, TestSpec, Sandbox,
+    Contract, TestSpec, Sandbox, AgentTask,
     HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep,
     HttpStatusOk, ArtifactPresent, ContentServesNonce,
 )
@@ -141,14 +141,36 @@ def _parse_assertion(raw: dict, ctx: str) -> Any:
     raise ContractError(f"{ctx}: unreachable assertion kind '{kind}'")
 
 
+_AGENT_TASK_ALLOWED = {"prompt", "expected_artifacts", "model", "timeout_s"}
+
+
+def _parse_agent_task(raw: Any, ctx: str) -> AgentTask:
+    if not isinstance(raw, dict):
+        raise ContractError(f"{ctx}: agent_task must be an object")
+    _reject_unknown(raw, _AGENT_TASK_ALLOWED, ctx)
+    _require_keys(raw, ["prompt", "expected_artifacts"], ctx)
+    ea = raw["expected_artifacts"]
+    if not isinstance(ea, list) or not all(isinstance(x, str) and x for x in ea):
+        raise ContractError(f"{ctx}.expected_artifacts must be a non-empty list of strings")
+    return AgentTask(
+        prompt=str(raw["prompt"]),
+        expected_artifacts=list(ea),
+        model=str(raw.get("model", "gemini-2.5-flash")),
+        timeout_s=int(raw.get("timeout_s", 180)),
+    )
+
+
 def _parse_test(raw: dict, ctx: str) -> TestSpec:
     if not isinstance(raw, dict):
         raise ContractError(f"{ctx}: test must be a dict")
-    _reject_unknown(raw, {"steps", "assertions", "produces", "requires"}, ctx)
+    _reject_unknown(raw,
+                     {"steps", "assertions", "produces", "requires", "agent_task"},
+                     ctx)
     steps_raw = raw.get("steps", [])
     asserts_raw = raw.get("assertions", [])
     produces_raw = raw.get("produces", []) or []
     requires_raw = raw.get("requires", []) or []
+    agent_task_raw = raw.get("agent_task")
     if not isinstance(steps_raw, list):
         raise ContractError(f"{ctx}.steps must be a list")
     if not isinstance(asserts_raw, list):
@@ -177,8 +199,23 @@ def _parse_test(raw: dict, ctx: str) -> TestSpec:
                 f"{ctx}.assertions[{i}] references step '{ref}' which is not in "
                 f"this test (available: {sorted(step_ids)})")
 
+    agent_task = (_parse_agent_task(agent_task_raw, f"{ctx}.agent_task")
+                   if agent_task_raw is not None else None)
+
+    # If agent_task declares expected_artifacts, they should appear in the
+    # test's produces — otherwise cross-test requires validation can't see them.
+    if agent_task and produces_raw:
+        missing_in_produces = [k for k in agent_task.expected_artifacts
+                               if k not in produces_raw]
+        if missing_in_produces:
+            raise ContractError(
+                f"{ctx}: agent_task.expected_artifacts {missing_in_produces} "
+                f"are not declared in produces {produces_raw}. Either add them "
+                f"to produces or remove them from expected_artifacts.")
+
     return TestSpec(steps=steps, assertions=assertions,
-                     produces=list(produces_raw), requires=list(requires_raw))
+                     produces=list(produces_raw), requires=list(requires_raw),
+                     agent_task=agent_task)
 
 
 def _validate_cross_test_dataflow(tests: dict[str, TestSpec], source: str) -> None:

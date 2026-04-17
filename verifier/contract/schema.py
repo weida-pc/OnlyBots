@@ -139,6 +139,27 @@ class ContentServesNonce:
 Assertion = HttpStatusOk | ArtifactPresent | ContentServesNonce
 
 
+# ── Agent task (Phase 2 prototype) ────────────────────────────────────────────
+
+@dataclass
+class AgentTask:
+    """Ask an LLM agent to perform the task itself, then have the verifier
+    spot-check the artifacts it reports.
+
+    The agent runs BEFORE the TestSpec's steps. Artifacts it reports are merged
+    into state, so the existing step primitives can probe them exactly as they
+    would artifacts extracted by a direct http step.
+
+    Keeping this as an optional field means Phase 1 contracts (no agent_task)
+    continue to run unchanged — the verifier drives. Phase 2 contracts add
+    agent_task to have the agent drive.
+    """
+    prompt: str                              # task description (no output format — runtime adds that)
+    expected_artifacts: list[str]            # keys the agent must return
+    model: str = "gemini-2.5-flash"
+    timeout_s: int = 180
+
+
 # ── Top-level ─────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -151,6 +172,10 @@ class TestSpec:
     #     one step's `extract` block or inject_nonce/env_secret step
     produces: list[str] = field(default_factory=list)
     requires: list[str] = field(default_factory=list)
+    # Phase 2: optional. If set, runs before `steps` and merges reported
+    # artifacts into state. `steps` then act as verifier probes against
+    # what the agent claims to have done.
+    agent_task: AgentTask | None = None
 
 
 @dataclass

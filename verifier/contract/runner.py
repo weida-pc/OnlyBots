@@ -32,7 +32,7 @@ import executor as _legacy
 
 
 from .schema import (
-    Contract, TestSpec,
+    Contract, TestSpec, AgentTask,
     HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep,
     HttpStatusOk, ArtifactPresent, ContentServesNonce,
 )
@@ -309,12 +309,62 @@ def _check_produces(test: TestSpec, test_name: str, state: dict) -> list[str]:
     return [k for k in test.produces if k not in state or not state[k]]
 
 
+def _run_agent_task(task: AgentTask, state: dict) -> dict:
+    """Run the Phase 2 agent task, merge its artifacts into state, and return
+    a step-shaped record (so it shows up in the run's step list alongside HTTP
+    steps, with a consistent schema for the DB and frontend).
+    """
+    # Local import so the contract package doesn't hard-depend on agent
+    # when no contract uses agent_task. Keeps Phase 1-only deployments slim.
+    from agent import run_agent_task
+
+    result = run_agent_task(
+        prompt=task.prompt,
+        expected_artifacts=task.expected_artifacts,
+        model=task.model,
+        timeout_s=task.timeout_s,
+    )
+
+    # Merge artifacts regardless of status. Even a "missing_keys" report may
+    # contain partial claims the probes can still fail on — we want the
+    # evidence, not just the verdict.
+    for k, v in result.artifacts.items():
+        if v not in (None, "", [], {}):
+            state[k] = v
+
+    ok = result.status == "ok"
+    return {
+        "step": f"_agent_task: {result.status}",
+        "step_id": "_agent_task",
+        "status": 200 if ok else 0,
+        "body": json.dumps({
+            "artifacts": result.artifacts,
+            "missing_keys": result.missing_keys,
+            "status": result.status,
+            "model": result.model,
+            "exit_code": result.exit_code,
+        }, default=str),
+        "elapsed_ms": int(result.elapsed_s * 1000),
+        "error": result.error,
+        "extracted": result.artifacts,
+        "agent": {
+            "status": result.status,
+            "model": result.model,
+            "elapsed_s": result.elapsed_s,
+            "raw_output_tail": result.raw_output,
+            "stderr_tail": result.stderr_tail,
+        },
+    }
+
+
 def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict]:
     """Execute all steps for the named test against the shared state.
 
-    Validates `requires` before running, and annotates unproduced `produces`
-    as a synthetic final step. Raises ContractRunError if requires are not met
-    (caller should surface as a contract-authoring bug, not a service failure).
+    Order of execution:
+      1. requires check (raises ContractRunError if state is missing them)
+      2. agent_task if set — runs the LLM agent, merges artifacts into state
+      3. steps — verifier's HTTP probes
+      4. produces check (annotates missing produces as a synthetic step)
     """
     test = contract.tests.get(test_name)
     if not test:
@@ -327,6 +377,12 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
     _check_requires(test, test_name, state)
 
     steps_out: list[dict] = []
+
+    # Phase 2: agent runs first, if declared. Its reported artifacts flow
+    # into state so the subsequent probes can verify them.
+    if test.agent_task is not None:
+        steps_out.append(_run_agent_task(test.agent_task, state))
+
     allowlist = contract.sandbox.url_allowlist
 
     for step in test.steps:

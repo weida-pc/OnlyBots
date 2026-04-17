@@ -9,33 +9,29 @@
   "tests": {
     "signup": {
       "produces": ["agentmail_api_key", "agentmail_inbox_id"],
+      "agent_task": {
+        "prompt": "Sign up for AgentMail autonomously. AgentMail is a programmable email-inbox service for AI agents. Its documentation is at https://docs.agentmail.to. The signup endpoint is POST https://api.agentmail.to/v0/agent/sign-up with a JSON body containing:\n  - human_email: a human contact email. Use \"sudo@pressclub.app\" (this address is pre-allowed).\n  - username: a unique username prefixed with \"onlybots-test-\" followed by a random suffix to avoid collisions.\n\nThe response is a JSON object with \"api_key\", \"organization_id\", and \"inbox_id\" fields. Execute the signup (use curl or any HTTP client available to you), then report the credentials.",
+        "expected_artifacts": ["agentmail_api_key", "agentmail_inbox_id"],
+        "model": "gemini-2.5-flash",
+        "timeout_s": 180
+      },
       "steps": [
         {
-          "kind": "inject_nonce",
-          "id": "unique_suffix",
-          "state_key": "agentmail_username",
-          "prefix": "onlybots-test"
-        },
-        {
           "kind": "http",
-          "id": "signup",
-          "method": "POST",
-          "url": "https://api.agentmail.to/v0/agent/sign-up",
-          "body_json": {
-            "human_email": "sudo@pressclub.app",
-            "username": "{agentmail_username}"
-          },
-          "extract": {
-            "agentmail_api_key": "api_key",
-            "agentmail_org_id": "organization_id",
-            "agentmail_inbox_id": "inbox_id"
-          },
-          "description": "POST /v0/agent/sign-up"
+          "id": "probe_auth",
+          "method": "GET",
+          "url": "https://api.agentmail.to/v0/inboxes",
+          "headers": {"Authorization": "Bearer {agentmail_api_key}"},
+          "description": "Verifier probe: does the agent-reported api_key actually work?"
         }
       ],
       "assertions": [
-        {"kind": "http_status_ok", "step": "signup"},
-        {"kind": "artifact_present", "artifact": "agentmail_api_key"}
+        {"kind": "artifact_present", "artifact": "agentmail_api_key",
+         "description": "agent reported an api_key"},
+        {"kind": "artifact_present", "artifact": "agentmail_inbox_id",
+         "description": "agent reported an inbox_id"},
+        {"kind": "http_status_ok", "step": "probe_auth",
+         "description": "agent-reported api_key is real (not hallucinated)"}
       ]
     },
     "persistence": {
