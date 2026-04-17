@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "service_slug": "here-now",
+  "notes": "Anonymous publish-to-URL service. No accounts. 'Persistence' means the published URL keeps serving our content. Each test injects a fresh nonce and verifies it appears in the live response body via resilient GET (plain http → curl_cffi Chrome fallback).",
+  "allowed_env": [],
+  "sandbox": {
+    "url_allowlist": ["here.now", "*.here.now", "*.r2.cloudflarestorage.com"],
+    "shell_approved": false
+  },
+  "tests": {
+    "signup": {
+      "steps": [
+        {
+          "kind": "inject_nonce",
+          "id": "nonce",
+          "state_key": "herenow_nonce"
+        },
+        {
+          "kind": "http",
+          "id": "publish",
+          "method": "POST",
+          "url": "https://here.now/api/v1/publish",
+          "headers": {"X-HereNow-Client": "onlybots/verifier"},
+          "body_json": {
+            "files": [{"path": "index.html", "size": 200, "contentType": "text/html; charset=utf-8"}]
+          },
+          "extract": {
+            "herenow_site_url": "siteUrl || site_url || url",
+            "herenow_upload_url": "upload.uploads.0.url || files.0.uploadUrl || files.0.url",
+            "herenow_upload_ct": "upload.uploads.0.headers.Content-Type",
+            "herenow_finalize_url": "upload.finalizeUrl || finalizeUrl || finalize_url",
+            "herenow_version_id": "upload.versionId || versionId || version_id"
+          }
+        },
+        {
+          "kind": "put_file",
+          "id": "upload",
+          "url": "{herenow_upload_url}",
+          "content_type": "{herenow_upload_ct}",
+          "body_template": "<html><body><h1>OnlyBots Verification Test</h1><!-- verify-nonce: {herenow_nonce} --><p data-onlybots-nonce=\"{herenow_nonce}\">{herenow_nonce}</p></body></html>"
+        },
+        {
+          "kind": "http",
+          "id": "finalize",
+          "method": "POST",
+          "url": "{herenow_finalize_url}",
+          "body_json": {"versionId": "{herenow_version_id}"},
+          "extract": {
+            "herenow_site_url": "siteUrl || site_url || url"
+          }
+        },
+        {
+          "kind": "http",
+          "id": "verify_live",
+          "method": "GET",
+          "url": "{herenow_site_url}",
+          "browser_fallback": true,
+          "must_contain_artifact": "herenow_nonce"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "publish"},
+        {"kind": "artifact_present", "artifact": "herenow_site_url"},
+        {"kind": "content_serves_nonce", "step": "verify_live"}
+      ]
+    },
+    "persistence": {
+      "steps": [
+        {
+          "kind": "http",
+          "id": "reverify_live",
+          "method": "GET",
+          "url": "{herenow_site_url}",
+          "browser_fallback": true,
+          "must_contain_artifact": "herenow_nonce"
+        }
+      ],
+      "assertions": [
+        {"kind": "content_serves_nonce", "step": "reverify_live"}
+      ]
+    },
+    "workflow": {
+      "steps": [
+        {
+          "kind": "inject_nonce",
+          "id": "nonce",
+          "state_key": "herenow_nonce"
+        },
+        {
+          "kind": "http",
+          "id": "publish",
+          "method": "POST",
+          "url": "https://here.now/api/v1/publish",
+          "headers": {"X-HereNow-Client": "onlybots/verifier"},
+          "body_json": {
+            "files": [{"path": "index.html", "size": 200, "contentType": "text/html; charset=utf-8"}]
+          },
+          "extract": {
+            "herenow_site_url": "siteUrl || site_url || url",
+            "herenow_upload_url": "upload.uploads.0.url || files.0.uploadUrl || files.0.url",
+            "herenow_upload_ct": "upload.uploads.0.headers.Content-Type",
+            "herenow_finalize_url": "upload.finalizeUrl || finalizeUrl || finalize_url",
+            "herenow_version_id": "upload.versionId || versionId || version_id"
+          }
+        },
+        {
+          "kind": "put_file",
+          "id": "upload",
+          "url": "{herenow_upload_url}",
+          "content_type": "{herenow_upload_ct}",
+          "body_template": "<html><body><h1>OnlyBots Verification Test</h1><!-- verify-nonce: {herenow_nonce} --><p data-onlybots-nonce=\"{herenow_nonce}\">{herenow_nonce}</p></body></html>"
+        },
+        {
+          "kind": "http",
+          "id": "finalize",
+          "method": "POST",
+          "url": "{herenow_finalize_url}",
+          "body_json": {"versionId": "{herenow_version_id}"},
+          "extract": {
+            "herenow_site_url": "siteUrl || site_url || url"
+          }
+        },
+        {
+          "kind": "http",
+          "id": "verify_live",
+          "method": "GET",
+          "url": "{herenow_site_url}",
+          "browser_fallback": true,
+          "must_contain_artifact": "herenow_nonce"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "publish"},
+        {"kind": "http_status_ok", "step": "finalize"},
+        {"kind": "artifact_present", "artifact": "herenow_site_url"},
+        {"kind": "content_serves_nonce", "step": "verify_live"}
+      ]
+    }
+  }
+}

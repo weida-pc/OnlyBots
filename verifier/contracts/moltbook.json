@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "service_slug": "moltbook",
+  "notes": "POST /api/v1/agents/register returns an API key instantly (true programmatic signup). The workflow test uses a pre-claimed MOLTBOOK_API_KEY from env because un-claimed accounts can't post (one-time human claim gate is a separate ownership layer, not a signup blocker).",
+  "allowed_env": ["MOLTBOOK_API_KEY"],
+  "sandbox": {
+    "url_allowlist": ["www.moltbook.com", "moltbook.com"],
+    "shell_approved": false
+  },
+  "tests": {
+    "signup": {
+      "steps": [
+        {
+          "kind": "inject_nonce",
+          "id": "agent_suffix",
+          "state_key": "moltbook_agent_name",
+          "prefix": "ob-verify"
+        },
+        {
+          "kind": "http",
+          "id": "register",
+          "method": "POST",
+          "url": "https://www.moltbook.com/api/v1/agents/register",
+          "body_json": {
+            "name": "{moltbook_agent_name}",
+            "description": "Automated verification agent for OnlyBots trust registry"
+          },
+          "extract": {
+            "moltbook_api_key": "agent.api_key || api_key",
+            "moltbook_agent_id": "agent.id || agent_id || id"
+          },
+          "description": "POST /api/v1/agents/register"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "register"},
+        {"kind": "artifact_present", "artifact": "moltbook_api_key"}
+      ]
+    },
+    "persistence": {
+      "steps": [
+        {
+          "kind": "http",
+          "id": "get_me",
+          "method": "GET",
+          "url": "https://www.moltbook.com/api/v1/agents/me",
+          "headers": {"Authorization": "Bearer {moltbook_api_key}"},
+          "description": "GET /api/v1/agents/me with bearer"
+        }
+      ],
+      "assertions": [
+        {"kind": "auth_still_valid", "step": "get_me"}
+      ]
+    },
+    "workflow": {
+      "steps": [
+        {
+          "kind": "env_secret",
+          "id": "load_claimed_key",
+          "env_var": "MOLTBOOK_API_KEY",
+          "state_key": "moltbook_api_key",
+          "required": true
+        },
+        {
+          "kind": "http",
+          "id": "create_post",
+          "method": "POST",
+          "url": "https://www.moltbook.com/api/v1/posts",
+          "headers": {"Authorization": "Bearer {moltbook_api_key}"},
+          "body_json": {
+            "submolt_name": "general",
+            "title": "OnlyBots Verification Test",
+            "content": "Automated verification post from OnlyBots trust registry."
+          },
+          "extract": {
+            "moltbook_post_id": "post.id || id || post_id"
+          },
+          "description": "POST /api/v1/posts"
+        },
+        {
+          "kind": "http",
+          "id": "comment",
+          "method": "POST",
+          "url": "https://www.moltbook.com/api/v1/posts/{moltbook_post_id}/comments",
+          "headers": {"Authorization": "Bearer {moltbook_api_key}"},
+          "body_json": {"content": "Verification comment from OnlyBots."},
+          "description": "POST /api/v1/posts/{id}/comments"
+        },
+        {
+          "kind": "http",
+          "id": "upvote",
+          "method": "POST",
+          "url": "https://www.moltbook.com/api/v1/posts/{moltbook_post_id}/upvote",
+          "headers": {"Authorization": "Bearer {moltbook_api_key}"},
+          "body_json": {},
+          "description": "POST /api/v1/posts/{id}/upvote"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "create_post"},
+        {"kind": "artifact_present", "artifact": "moltbook_post_id"},
+        {"kind": "http_status_ok", "step": "comment"},
+        {"kind": "http_status_ok", "step": "upvote"}
+      ]
+    }
+  }
+}

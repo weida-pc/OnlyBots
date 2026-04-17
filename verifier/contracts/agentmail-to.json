@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "service_slug": "agentmail-to",
+  "notes": "Native API signup: POST /v0/agent/sign-up returns api_key + inbox_id. Persistence proven by GET /v0/inboxes with bearer. Workflow sends email to pre-allowed human_email (sudo@pressclub.app) and lists inbox to confirm it's operational.",
+  "allowed_env": [],
+  "sandbox": {
+    "url_allowlist": ["api.agentmail.to"],
+    "shell_approved": false
+  },
+  "tests": {
+    "signup": {
+      "steps": [
+        {
+          "kind": "inject_nonce",
+          "id": "unique_suffix",
+          "state_key": "agentmail_username",
+          "prefix": "onlybots-test"
+        },
+        {
+          "kind": "http",
+          "id": "signup",
+          "method": "POST",
+          "url": "https://api.agentmail.to/v0/agent/sign-up",
+          "body_json": {
+            "human_email": "sudo@pressclub.app",
+            "username": "{agentmail_username}"
+          },
+          "extract": {
+            "agentmail_api_key": "api_key",
+            "agentmail_org_id": "organization_id",
+            "agentmail_inbox_id": "inbox_id"
+          },
+          "description": "POST /v0/agent/sign-up"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "signup"},
+        {"kind": "artifact_present", "artifact": "agentmail_api_key"}
+      ]
+    },
+    "persistence": {
+      "steps": [
+        {
+          "kind": "http",
+          "id": "list_inboxes",
+          "method": "GET",
+          "url": "https://api.agentmail.to/v0/inboxes",
+          "headers": {"Authorization": "Bearer {agentmail_api_key}"},
+          "description": "GET /v0/inboxes with bearer"
+        }
+      ],
+      "assertions": [
+        {"kind": "auth_still_valid", "step": "list_inboxes"}
+      ]
+    },
+    "workflow": {
+      "steps": [
+        {
+          "kind": "http",
+          "id": "send_email",
+          "method": "POST",
+          "url": "https://api.agentmail.to/v0/inboxes/{agentmail_inbox_id}/messages/send",
+          "headers": {"Authorization": "Bearer {agentmail_api_key}"},
+          "body_json": {
+            "to": ["sudo@pressclub.app"],
+            "subject": "OnlyBots Verification Test",
+            "body": "This is an automated test by OnlyBots trust registry."
+          },
+          "description": "POST /v0/inboxes/{inbox_id}/messages/send"
+        },
+        {
+          "kind": "http",
+          "id": "list_messages",
+          "method": "GET",
+          "url": "https://api.agentmail.to/v0/inboxes/{agentmail_inbox_id}/messages",
+          "headers": {"Authorization": "Bearer {agentmail_api_key}"},
+          "description": "GET /v0/inboxes/{inbox_id}/messages"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "send_email"},
+        {"kind": "http_status_ok", "step": "list_messages"}
+      ]
+    }
+  }
+}

@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "service_slug": "browser-use",
+  "notes": "Uses pre-provisioned BROWSER_USE_API_KEY (no programmatic signup — requires domain email). Uses non-standard X-Browser-Use-API-Key header instead of Authorization Bearer. Workflow creates a browser automation task.",
+  "allowed_env": ["BROWSER_USE_API_KEY"],
+  "sandbox": {
+    "url_allowlist": ["api.browser-use.com"],
+    "shell_approved": false
+  },
+  "tests": {
+    "signup": {
+      "steps": [
+        {
+          "kind": "env_secret",
+          "id": "load_key",
+          "env_var": "BROWSER_USE_API_KEY",
+          "state_key": "browseruse_api_key",
+          "required": true
+        },
+        {
+          "kind": "http",
+          "id": "list_sessions",
+          "method": "GET",
+          "url": "https://api.browser-use.com/api/v3/sessions",
+          "headers": {"X-Browser-Use-API-Key": "{browseruse_api_key}"},
+          "extract": {
+            "browseruse_session_count": "total"
+          },
+          "description": "GET /api/v3/sessions (auth probe)"
+        }
+      ],
+      "assertions": [
+        {"kind": "auth_still_valid", "step": "list_sessions"}
+      ]
+    },
+    "persistence": {
+      "steps": [
+        {
+          "kind": "env_secret",
+          "id": "load_key",
+          "env_var": "BROWSER_USE_API_KEY",
+          "state_key": "browseruse_api_key",
+          "required": true
+        },
+        {
+          "kind": "http",
+          "id": "list_sessions_again",
+          "method": "GET",
+          "url": "https://api.browser-use.com/api/v3/sessions",
+          "headers": {"X-Browser-Use-API-Key": "{browseruse_api_key}"},
+          "description": "GET /api/v3/sessions (re-auth probe)"
+        }
+      ],
+      "assertions": [
+        {"kind": "auth_still_valid", "step": "list_sessions_again"}
+      ]
+    },
+    "workflow": {
+      "steps": [
+        {
+          "kind": "env_secret",
+          "id": "load_key",
+          "env_var": "BROWSER_USE_API_KEY",
+          "state_key": "browseruse_api_key",
+          "required": true
+        },
+        {
+          "kind": "http",
+          "id": "create_session",
+          "method": "POST",
+          "url": "https://api.browser-use.com/api/v3/sessions",
+          "headers": {"X-Browser-Use-API-Key": "{browseruse_api_key}"},
+          "body_json": {
+            "task": "Navigate to https://example.com and return the page title"
+          },
+          "extract": {
+            "browseruse_session_id": "id || session_id"
+          },
+          "description": "POST /api/v3/sessions (create automation task)"
+        },
+        {
+          "kind": "http",
+          "id": "check_session",
+          "method": "GET",
+          "url": "https://api.browser-use.com/api/v3/sessions/{browseruse_session_id}",
+          "headers": {"X-Browser-Use-API-Key": "{browseruse_api_key}"},
+          "description": "GET /api/v3/sessions/{id} (verify task started)"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "create_session"},
+        {"kind": "artifact_present", "artifact": "browseruse_session_id"},
+        {"kind": "http_status_ok", "step": "check_session"}
+      ]
+    }
+  }
+}

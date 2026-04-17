@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "service_slug": "signbee",
+  "notes": "Uses a pre-provisioned SIGNBEE_API_KEY (no programmatic signup — sender identity needs email OTP). With the API key, sends a document and verifies the API accepted it. Persistence sends a second document to prove the key still works.",
+  "allowed_env": ["SIGNBEE_API_KEY"],
+  "sandbox": {
+    "url_allowlist": ["signb.ee"],
+    "shell_approved": false
+  },
+  "tests": {
+    "signup": {
+      "steps": [
+        {
+          "kind": "env_secret",
+          "id": "load_key",
+          "env_var": "SIGNBEE_API_KEY",
+          "state_key": "signbee_api_key",
+          "required": true
+        },
+        {
+          "kind": "http",
+          "id": "send",
+          "method": "POST",
+          "url": "https://signb.ee/api/v1/send",
+          "headers": {"Authorization": "Bearer {signbee_api_key}"},
+          "body_json": {
+            "recipient_name": "OnlyBots Verifier",
+            "recipient_email": "sudo@pressclub.app",
+            "markdown": "# OnlyBots Verification Document\n\nThis document verifies that Signbee supports autonomous document workflows for AI agents registered in the OnlyBots trust registry.\n\n## Scope\n\nThis is an automated verification-only test document."
+          },
+          "extract": {
+            "signbee_document_id": "document_id || id"
+          },
+          "description": "POST /api/v1/send"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "send"},
+        {"kind": "artifact_present", "artifact": "signbee_document_id"}
+      ]
+    },
+    "persistence": {
+      "steps": [
+        {
+          "kind": "env_secret",
+          "id": "load_key",
+          "env_var": "SIGNBEE_API_KEY",
+          "state_key": "signbee_api_key",
+          "required": true
+        },
+        {
+          "kind": "http",
+          "id": "send_again",
+          "method": "POST",
+          "url": "https://signb.ee/api/v1/send",
+          "headers": {"Authorization": "Bearer {signbee_api_key}"},
+          "body_json": {
+            "recipient_name": "OnlyBots Persistence Check",
+            "recipient_email": "sudo@pressclub.app",
+            "markdown": "# Persistence Check\n\nVerifying API key still works after initial signup."
+          },
+          "description": "POST /api/v1/send (2nd — verify key still works)"
+        }
+      ],
+      "assertions": [
+        {"kind": "auth_still_valid", "step": "send_again"}
+      ]
+    },
+    "workflow": {
+      "steps": [
+        {
+          "kind": "env_secret",
+          "id": "load_key",
+          "env_var": "SIGNBEE_API_KEY",
+          "state_key": "signbee_api_key",
+          "required": true
+        },
+        {
+          "kind": "http",
+          "id": "send_workflow",
+          "method": "POST",
+          "url": "https://signb.ee/api/v1/send",
+          "headers": {"Authorization": "Bearer {signbee_api_key}"},
+          "body_json": {
+            "recipient_name": "OnlyBots Workflow Check",
+            "recipient_email": "sudo@pressclub.app",
+            "markdown": "# OnlyBots Workflow Check\n\nEnd-to-end workflow verification: send document via Signbee API."
+          },
+          "extract": {
+            "signbee_workflow_doc_id": "document_id || id"
+          },
+          "description": "POST /api/v1/send (workflow)"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "send_workflow"},
+        {"kind": "artifact_present", "artifact": "signbee_workflow_doc_id"}
+      ]
+    }
+  }
+}
