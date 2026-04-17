@@ -313,13 +313,21 @@ def _run_agent_task(task: AgentTask, state: dict) -> dict:
     """Run the Phase 2 agent task, merge its artifacts into state, and return
     a step-shaped record (so it shows up in the run's step list alongside HTTP
     steps, with a consistent schema for the DB and frontend).
+
+    The task prompt is template-rendered against state BEFORE being passed to
+    the agent. This lets `inject_nonce` / `env_secret` setup steps hand values
+    to the agent (e.g. "embed this nonce: {herenow_nonce}"). A missing
+    template variable here is a contract-authoring bug — the agent would
+    otherwise get a prompt like "embed this nonce: {herenow_nonce}" literally.
     """
     # Local import so the contract package doesn't hard-depend on agent
     # when no contract uses agent_task. Keeps Phase 1-only deployments slim.
     from agent import run_agent_task
 
+    rendered_prompt = _render_string(task.prompt, state)
+
     result = run_agent_task(
-        prompt=task.prompt,
+        prompt=rendered_prompt,
         expected_artifacts=task.expected_artifacts,
         model=task.model,
         timeout_s=task.timeout_s,
@@ -377,16 +385,22 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
     _check_requires(test, test_name, state)
 
     steps_out: list[dict] = []
-
-    # Phase 2: agent runs first, if declared. Its reported artifacts flow
-    # into state so the subsequent probes can verify them.
-    if test.agent_task is not None:
-        steps_out.append(_run_agent_task(test.agent_task, state))
-
     allowlist = contract.sandbox.url_allowlist
 
-    for step in test.steps:
-        # Sandbox URL check — happens after template rendering for http / put_file.
+    # Execution order (regardless of declaration order in the contract):
+    #   1. Setup steps (inject_nonce / env_secret / wait) populate state with
+    #      values the agent or probes will reference.
+    #   2. Agent task (if present) runs with setup state already in place, so
+    #      its prompt can template-reference {nonce}, {api_key}, etc.
+    #   3. Probe steps (http / put_file) are verifier's independent checks
+    #      against what the agent claims — or the full direct-HTTP flow when
+    #      agent_task is absent.
+    setup_kinds = (InjectNonceStep, EnvSecretStep, WaitStep)
+    setup_steps = [s for s in test.steps if isinstance(s, setup_kinds)]
+    probe_steps = [s for s in test.steps if not isinstance(s, setup_kinds)]
+
+    def _execute_one(step: Any) -> None:
+        # Sandbox URL check happens after template rendering for http/put_file.
         try:
             if isinstance(step, (HttpStep, PutFileStep)):
                 rendered_url = _render_string(step.url, state)
@@ -397,14 +411,14 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
                         "step_id": step.id,
                         "status": 0, "body": "", "elapsed_ms": 0, "error": err,
                     })
-                    continue
+                    return
         except TemplateError as e:
             steps_out.append({
                 "step": f"{step.id}: template error",
                 "step_id": step.id,
                 "status": 0, "body": "", "elapsed_ms": 0, "error": str(e),
             })
-            continue
+            return
 
         try:
             if isinstance(step, HttpStep):
@@ -427,9 +441,22 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
                    "status": 0, "body": "", "elapsed_ms": 0, "error": str(e)}
         except Exception as e:
             rec = {"step": f"{step.id}: exception", "step_id": step.id,
-                   "status": 0, "body": "", "elapsed_ms": 0, "error": f"{type(e).__name__}: {e}"}
+                   "status": 0, "body": "", "elapsed_ms": 0,
+                   "error": f"{type(e).__name__}: {e}"}
 
         steps_out.append(rec)
+
+    # 1. Setup
+    for step in setup_steps:
+        _execute_one(step)
+
+    # 2. Agent task (after setup so prompt can reference setup state)
+    if test.agent_task is not None:
+        steps_out.append(_run_agent_task(test.agent_task, state))
+
+    # 3. Probes
+    for step in probe_steps:
+        _execute_one(step)
 
     # Annotate missing produces as a diagnostic step (not an assertion failure
     # — assertions check what actually matters; this flags stale declarations).

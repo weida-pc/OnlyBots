@@ -9,6 +9,12 @@
   "tests": {
     "signup": {
       "produces": ["herenow_site_url", "herenow_nonce"],
+      "agent_task": {
+        "prompt": "Publish a single-file HTML page to here.now autonomously. here.now is an anonymous static-site publishing service. The API is at https://here.now and the full flow is three HTTP calls:\n\n1. POST https://here.now/api/v1/publish with a JSON body like {\"files\": [{\"path\": \"index.html\", \"size\": N, \"contentType\": \"text/html; charset=utf-8\"}]} where N is the byte length of the HTML you intend to upload. The response contains:\n   - siteUrl (the final public URL of the site)\n   - upload.uploads[0].url (a presigned URL to PUT the file contents to)\n   - upload.uploads[0].headers['Content-Type'] (the Content-Type header you must send on the PUT)\n   - upload.finalizeUrl (URL to POST to after uploading)\n   - upload.versionId (required in the finalize POST body)\n\n2. PUT the HTML bytes to upload.uploads[0].url, with the Content-Type header from the response. No body wrapping — just the raw HTML bytes.\n\n3. POST to upload.finalizeUrl with JSON body {\"versionId\": \"<the versionId from step 1>\"}. This activates the site.\n\nThe HTML you upload MUST contain this exact nonce string verbatim:\n\n    {herenow_nonce}\n\nEmbed it in both the page text and an HTML comment so it definitely appears in the served body. A working HTML template is:\n\n    <html><body><h1>OnlyBots Verification Test</h1><!-- verify-nonce: {herenow_nonce} --><p data-onlybots-nonce=\"{herenow_nonce}\">{herenow_nonce}</p></body></html>\n\nUse curl or any HTTP client available. Execute all three steps. When complete, report the final site URL.",
+        "expected_artifacts": ["herenow_site_url"],
+        "model": "gemini-2.5-flash",
+        "timeout_s": 240
+      },
       "steps": [
         {
           "kind": "inject_nonce",
@@ -17,51 +23,19 @@
         },
         {
           "kind": "http",
-          "id": "publish",
-          "method": "POST",
-          "url": "https://here.now/api/v1/publish",
-          "headers": {"X-HereNow-Client": "onlybots/verifier"},
-          "body_json": {
-            "files": [{"path": "index.html", "size": 200, "contentType": "text/html; charset=utf-8"}]
-          },
-          "extract": {
-            "herenow_site_url": "siteUrl || site_url || url",
-            "herenow_upload_url": "upload.uploads[0].url || files[0].uploadUrl || files[0].url",
-            "herenow_upload_ct": "upload.uploads[0].headers.\"Content-Type\"",
-            "herenow_finalize_url": "upload.finalizeUrl || finalizeUrl || finalize_url",
-            "herenow_version_id": "upload.versionId || versionId || version_id"
-          }
-        },
-        {
-          "kind": "put_file",
-          "id": "upload",
-          "url": "{herenow_upload_url}",
-          "content_type": "{herenow_upload_ct}",
-          "body_template": "<html><body><h1>OnlyBots Verification Test</h1><!-- verify-nonce: {herenow_nonce} --><p data-onlybots-nonce=\"{herenow_nonce}\">{herenow_nonce}</p></body></html>"
-        },
-        {
-          "kind": "http",
-          "id": "finalize",
-          "method": "POST",
-          "url": "{herenow_finalize_url}",
-          "body_json": {"versionId": "{herenow_version_id}"},
-          "extract": {
-            "herenow_site_url": "siteUrl || site_url || url"
-          }
-        },
-        {
-          "kind": "http",
           "id": "verify_live",
           "method": "GET",
           "url": "{herenow_site_url}",
           "browser_fallback": true,
-          "must_contain_artifact": "herenow_nonce"
+          "must_contain_artifact": "herenow_nonce",
+          "description": "Verifier probe: does the agent-reported URL actually serve our nonce?"
         }
       ],
       "assertions": [
-        {"kind": "http_status_ok", "step": "publish"},
-        {"kind": "artifact_present", "artifact": "herenow_site_url"},
-        {"kind": "content_serves_nonce", "step": "verify_live"}
+        {"kind": "artifact_present", "artifact": "herenow_site_url",
+         "description": "agent reported a site URL"},
+        {"kind": "content_serves_nonce", "step": "verify_live",
+         "description": "agent's URL serves our verifier-generated nonce (not hallucinated)"}
       ]
     },
     "persistence": {
