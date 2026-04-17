@@ -4,11 +4,11 @@
   "notes": "Uses pre-provisioned BROWSER_USE_API_KEY (no programmatic signup — requires domain email). Uses non-standard X-Browser-Use-API-Key header instead of Authorization Bearer. Workflow creates a browser automation task.",
   "allowed_env": ["BROWSER_USE_API_KEY"],
   "sandbox": {
-    "url_allowlist": ["api.browser-use.com"],
-    "shell_approved": false
+    "url_allowlist": ["api.browser-use.com"]
   },
   "tests": {
     "signup": {
+      "produces": ["browseruse_api_key"],
       "steps": [
         {
           "kind": "env_secret",
@@ -30,18 +30,13 @@
         }
       ],
       "assertions": [
-        {"kind": "auth_still_valid", "step": "list_sessions"}
+        {"kind": "http_status_ok", "step": "list_sessions",
+         "description": "credential accepted at signup"}
       ]
     },
     "persistence": {
+      "requires": ["browseruse_api_key"],
       "steps": [
-        {
-          "kind": "env_secret",
-          "id": "load_key",
-          "env_var": "BROWSER_USE_API_KEY",
-          "state_key": "browseruse_api_key",
-          "required": true
-        },
         {
           "kind": "http",
           "id": "list_sessions_again",
@@ -52,18 +47,14 @@
         }
       ],
       "assertions": [
-        {"kind": "auth_still_valid", "step": "list_sessions_again"}
+        {"kind": "http_status_ok", "step": "list_sessions_again",
+         "description": "credential still valid"}
       ]
     },
     "workflow": {
+      "requires": ["browseruse_api_key"],
+      "produces": ["browseruse_session_id"],
       "steps": [
-        {
-          "kind": "env_secret",
-          "id": "load_key",
-          "env_var": "BROWSER_USE_API_KEY",
-          "state_key": "browseruse_api_key",
-          "required": true
-        },
         {
           "kind": "http",
           "id": "create_session",

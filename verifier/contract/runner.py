@@ -1,7 +1,7 @@
 """Contract runner — executes steps and evaluates assertions.
 
 Two public functions:
-  - run_test_steps(contract, test_name, state, built_ins) -> list[step_record]
+  - run_test_steps(contract, test_name, state) -> list[step_record]
   - evaluate_verdict(contract, test_name, steps, state) -> {passed, confidence, reason, blocker}
 
 Steps mutate the shared `state` dict (adding extracted artifacts). Assertions
@@ -10,6 +10,8 @@ are pure — they read state and steps and decide pass/fail.
 Template syntax: `{varname}` is replaced with the string form of state[varname].
 Unresolved variables raise an error at execution time so contracts fail loudly
 rather than silently sending empty strings to an API.
+
+Extraction syntax: JMESPath (https://jmespath.org/). Chain fallbacks with `||`.
 """
 from __future__ import annotations
 
@@ -21,6 +23,8 @@ import urllib.parse
 import uuid
 from typing import Any
 
+import jmespath
+
 # Import the low-level HTTP helpers from the existing executor module so we
 # don't duplicate HTTP client logic — the contract runner is a layer *on top*
 # of the HTTP primitives, not a replacement for them.
@@ -29,9 +33,8 @@ import executor as _legacy
 
 from .schema import (
     Contract, TestSpec,
-    HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep, ShellStep,
-    HttpStatusOk, HttpBodyContains, ArtifactPresent,
-    ContentServesNonce, AuthStillValid,
+    HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep,
+    HttpStatusOk, ArtifactPresent, ContentServesNonce,
 )
 
 
@@ -46,14 +49,27 @@ class TemplateError(Exception):
 
 
 def _render_string(s: str, state: dict) -> str:
-    """Replace {varname} with state[varname]. Missing vars raise TemplateError."""
+    """Replace {varname} with str(state[varname]). Missing vars raise TemplateError.
+
+    Also rejects templating non-scalar values (dict/list) since str() on those
+    produces Python repr that breaks URLs, JSON bodies, and everything else.
+    The critique flagged silent type coercion here — this is the fix.
+    """
     def sub(m: re.Match) -> str:
         key = m.group(1)
         if key not in state:
             raise TemplateError(f"template variable {{{key}}} not in state; "
                                 f"available keys: {sorted(state.keys())}")
         val = state[key]
-        return "" if val is None else str(val)
+        if val is None:
+            raise TemplateError(f"template variable {{{key}}} is None; "
+                                f"check extraction in earlier step")
+        if isinstance(val, (dict, list)):
+            raise TemplateError(
+                f"template variable {{{key}}} is {type(val).__name__}, "
+                f"expected scalar. Fix the extract expression to pull out the "
+                f"specific scalar field instead of the whole object.")
+        return str(val)
     return _TEMPLATE_RE.sub(sub, s)
 
 
@@ -68,49 +84,33 @@ def _render_any(obj: Any, state: dict) -> Any:
     return obj
 
 
-# ── JSONPath-ish extraction ───────────────────────────────────────────────────
-
-def _walk_path(data: Any, path: str) -> Any:
-    """Walk a dotted path through nested dicts/lists. Returns None if any
-    segment misses. Numeric segments index into lists.
-
-    e.g. walk_path({'a': [{'b': 1}]}, 'a.0.b') == 1
-    """
-    cur = data
-    for seg in path.split("."):
-        if cur is None:
-            return None
-        if seg.isdigit() and isinstance(cur, list):
-            idx = int(seg)
-            cur = cur[idx] if 0 <= idx < len(cur) else None
-        elif isinstance(cur, dict):
-            cur = cur.get(seg)
-        else:
-            return None
-    return cur
-
+# ── JMESPath extraction with || fallback ──────────────────────────────────────
 
 def _extract_value(data: Any, expr: str) -> Any:
-    """Evaluate an extraction expression with `||` fallbacks.
+    """Evaluate a JMESPath expression with `||` fallback chains.
 
-    e.g. "upload.uploads.0.url || files.0.uploadUrl"
-    Returns the first non-None, non-empty value.
+    JMESPath's built-in `||` treats 0, False, empty list/dict, empty string
+    as "falsy" and falls through. That matches our notion of "empty/unset"
+    for the domain (URLs, IDs, API keys), so we just hand the whole
+    expression to jmespath directly.
+
+    Returns None if the expression doesn't resolve.
     """
-    for alt in [a.strip() for a in expr.split("||")]:
-        val = _walk_path(data, alt)
-        if val not in (None, ""):
-            return val
-    return None
+    try:
+        result = jmespath.search(expr, data)
+    except jmespath.exceptions.JMESPathError:
+        return None
+    # JMESPath returns empty string/list/dict as-is; normalize "empty" to None
+    if result in (None, "", [], {}):
+        return None
+    return result
 
 
 # ── Step execution ────────────────────────────────────────────────────────────
 
-def _step_record(step_id: str, description: str, raw: dict, extra: dict | None = None) -> dict:
-    """Build the canonical step dict stored in the run's steps list.
-
-    Shape matches what the legacy executors produced so the frontend + verdict
-    evaluators can consume either source identically.
-    """
+def _step_record(step_id: str, description: str, raw: dict,
+                  extra: dict | None = None) -> dict:
+    """Build the canonical step dict stored in the run's steps list."""
     rec = {
         "step": f"{step_id}: {description}" if description else step_id,
         "step_id": step_id,
@@ -247,18 +247,7 @@ def _run_wait(step: WaitStep) -> dict:
     }
 
 
-def _run_shell(step: ShellStep, contract: Contract) -> dict:
-    # Gated: contracts must explicitly opt-in AND the step must be pre-approved.
-    # Not implemented in v1 — any shell step produces an error.
-    return {
-        "step": f"{step.id}: shell (disabled in v1)",
-        "step_id": step.id,
-        "status": 0, "body": "", "elapsed_ms": 0,
-        "error": "shell step kind is not implemented in v1",
-    }
-
-
-# ── URL allowlist enforcement ─────────────────────────────────────────────────
+# ── URL allowlist enforcement (speed bump, NOT a sandbox) ─────────────────────
 
 def _host_matches(host: str, pattern: str) -> bool:
     """Pattern can be a literal host or '*.example.com' to match subdomains."""
@@ -269,9 +258,18 @@ def _host_matches(host: str, pattern: str) -> bool:
 
 
 def _check_url_allowed(url: str, allowlist: list[str]) -> str | None:
-    """Returns None if allowed, else an error string."""
+    """Returns None if allowed, else an error string.
+
+    FAIL-CLOSED: an empty allowlist rejects every URL. Previous behavior
+    (empty = no restriction) was security-theater-code that lied to readers.
+    If a contract genuinely needs to hit any URL, it must say so explicitly
+    with `"url_allowlist": ["*"]` — a pattern that currently matches nothing
+    (we don't implement a wildcard-everything), making the intent impossible
+    to express silently.
+    """
     if not allowlist:
-        return None  # empty allowlist = no restriction (development mode)
+        return ("url_allowlist is empty — fail-closed. Add the required hosts "
+                "to contract.sandbox.url_allowlist.")
     try:
         host = urllib.parse.urlparse(url).hostname or ""
     except Exception:
@@ -284,8 +282,40 @@ def _check_url_allowed(url: str, allowlist: list[str]) -> str | None:
 
 # ── Public API: run a test's steps ────────────────────────────────────────────
 
+class ContractRunError(Exception):
+    """Raised when a contract's declared requires/produces are violated.
+
+    These are contract-authoring bugs, not service failures — they should
+    surface immediately rather than producing confusing verification output.
+    """
+    pass
+
+
+def _check_requires(test: TestSpec, test_name: str, state: dict) -> None:
+    missing = [k for k in test.requires if k not in state or not state[k]]
+    if missing:
+        raise ContractRunError(
+            f"test '{test_name}' requires {missing} but they're not in state "
+            f"(available: {sorted(state.keys())}). An earlier test must "
+            f"produce these, or this test shouldn't run in isolation.")
+
+
+def _check_produces(test: TestSpec, test_name: str, state: dict) -> list[str]:
+    """Returns list of keys that the contract promised to produce but didn't.
+    Does not raise — the steps may have legitimately failed, and the assertion
+    layer will report that. But we annotate the run so reviewers see when
+    the produces declaration is stale.
+    """
+    return [k for k in test.produces if k not in state or not state[k]]
+
+
 def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict]:
-    """Execute all steps for the named test against the shared state."""
+    """Execute all steps for the named test against the shared state.
+
+    Validates `requires` before running, and annotates unproduced `produces`
+    as a synthetic final step. Raises ContractRunError if requires are not met
+    (caller should surface as a contract-authoring bug, not a service failure).
+    """
     test = contract.tests.get(test_name)
     if not test:
         return [{
@@ -293,6 +323,8 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
             "step_id": "_missing", "status": 0, "body": "", "elapsed_ms": 0,
             "error": f"no test named '{test_name}' in contract for {contract.service_slug}",
         }]
+
+    _check_requires(test, test_name, state)
 
     steps_out: list[dict] = []
     allowlist = contract.sandbox.url_allowlist
@@ -329,8 +361,6 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
                 rec = _run_env_secret(step, state, contract)
             elif isinstance(step, WaitStep):
                 rec = _run_wait(step)
-            elif isinstance(step, ShellStep):
-                rec = _run_shell(step, contract)
             else:
                 rec = {"step": f"{getattr(step, 'id', '?')}: unknown step kind",
                        "step_id": getattr(step, "id", "?"),
@@ -344,6 +374,17 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
                    "status": 0, "body": "", "elapsed_ms": 0, "error": f"{type(e).__name__}: {e}"}
 
         steps_out.append(rec)
+
+    # Annotate missing produces as a diagnostic step (not an assertion failure
+    # — assertions check what actually matters; this flags stale declarations).
+    missing = _check_produces(test, test_name, state)
+    if missing:
+        steps_out.append({
+            "step": f"_produces_check: {len(missing)} unproduced artifact(s)",
+            "step_id": "_produces_check",
+            "status": 0, "body": "", "elapsed_ms": 0,
+            "error": f"contract promised to produce {missing} but state is missing them",
+        })
 
     return steps_out
 
@@ -365,7 +406,7 @@ def _assertion_result(passed: bool, message: str) -> dict:
     return {"passed": passed, "message": message}
 
 
-def _eval_assertion(a: Assertion, steps: list[dict], state: dict) -> dict:
+def _eval_assertion(a: Any, steps: list[dict], state: dict) -> dict:
     if isinstance(a, HttpStatusOk):
         step = _find_step(steps, a.step)
         if not step:
@@ -375,23 +416,6 @@ def _eval_assertion(a: Assertion, steps: list[dict], state: dict) -> dict:
         return _assertion_result(False,
             f"step '{a.step}' returned HTTP {step.get('status')} "
             f"{('(' + step['error'] + ')') if step.get('error') else ''}")
-
-    if isinstance(a, HttpBodyContains):
-        step = _find_step(steps, a.step)
-        if not step:
-            return _assertion_result(False, f"step '{a.step}' not found")
-        needle = a.needle
-        if a.needle_artifact:
-            needle = state.get(a.needle_artifact, "")
-        if not needle:
-            return _assertion_result(False,
-                f"needle for step '{a.step}' is empty "
-                f"(needle={a.needle!r}, needle_artifact={a.needle_artifact!r})")
-        body = step.get("body", "") or ""
-        found = needle in body
-        label = f"'{needle[:40]}'"
-        return _assertion_result(found,
-            f"step '{a.step}' body {'contains' if found else 'does NOT contain'} {label}")
 
     if isinstance(a, ArtifactPresent):
         val = state.get(a.artifact)
@@ -420,16 +444,6 @@ def _eval_assertion(a: Assertion, steps: list[dict], state: dict) -> dict:
                 f"but our nonce is not in the body — content not served")
         return _assertion_result(False,
             f"step '{a.step}' returned HTTP {status} via {via}; nonce not found")
-
-    if isinstance(a, AuthStillValid):
-        step = _find_step(steps, a.step)
-        if not step:
-            return _assertion_result(False, f"step '{a.step}' not found")
-        if _ok(step):
-            return _assertion_result(True,
-                f"auth-gated step '{a.step}' returned HTTP {step['status']} — credential valid")
-        return _assertion_result(False,
-            f"auth-gated step '{a.step}' returned HTTP {step.get('status')} — credential rejected")
 
     return _assertion_result(False, f"unknown assertion kind: {type(a).__name__}")
 
@@ -465,7 +479,6 @@ def evaluate_verdict(contract: Contract, test_name: str, steps: list[dict],
 
     reason = (" | ".join(f"✗ {m}" for m in failing)
                + ((" | (passing: " + " | ".join(passing) + ")") if passing else ""))
-    # Blocker = first failing assertion's short label
     first_fail = next(r for _, r in results if not r["passed"])
     blocker = first_fail["message"]
     return {"passed": False, "confidence": 1.0, "reason": reason, "blocker": blocker}

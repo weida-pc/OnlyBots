@@ -3,23 +3,24 @@
 Contracts live in verifier/contracts/{service_slug}.json and are hand-written
 in v1 (no LLM generation yet — that's Phase 5).
 
-Validation is strict: unknown fields, unknown step/assertion kinds, or missing
-required keys raise ContractError with a clear path to the offending element.
-This prevents typos in a JSON file from silently producing "no steps ran" at
-verification time.
+Validation is strict: unknown fields, unknown step/assertion kinds, missing
+required keys, and inconsistent produces/requires all raise ContractError.
+
+Cross-test validation (new post-critique):
+  - every `requires` key in persistence/workflow must be in signup's `produces`
+  - duplicate step ids within a test are rejected
+  - assertion step-refs must resolve to a step in the same test
 """
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 from .schema import (
     Contract, TestSpec, Sandbox,
-    HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep, ShellStep,
-    HttpStatusOk, HttpBodyContains, ArtifactPresent,
-    ContentServesNonce, AuthStillValid,
+    HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep,
+    HttpStatusOk, ArtifactPresent, ContentServesNonce,
 )
 
 
@@ -42,15 +43,12 @@ _STEP_KIND_ALLOWED_FIELDS: dict[str, set[str]] = {
     "inject_nonce": {"kind", "id", "state_key", "prefix"},
     "env_secret": {"kind", "id", "env_var", "state_key", "required"},
     "wait": {"kind", "id", "seconds"},
-    "shell": {"kind", "id", "command", "timeout_s"},
 }
 
 _ASSERTION_KIND_ALLOWED_FIELDS: dict[str, set[str]] = {
     "http_status_ok": {"kind", "step", "description"},
-    "http_body_contains": {"kind", "step", "needle", "needle_artifact", "description"},
     "artifact_present": {"kind", "artifact", "description"},
     "content_serves_nonce": {"kind", "step", "description"},
-    "auth_still_valid": {"kind", "step", "description"},
 }
 
 
@@ -115,10 +113,6 @@ def _parse_step(raw: dict, ctx: str) -> Any:
     if kind == "wait":
         _require_keys(raw, ["seconds"], ctx)
         return WaitStep(kind="wait", id=raw["id"], seconds=float(raw["seconds"]))
-    if kind == "shell":
-        _require_keys(raw, ["command"], ctx)
-        return ShellStep(kind="shell", id=raw["id"], command=raw["command"],
-                         timeout_s=float(raw.get("timeout_s", 30)))
     raise ContractError(f"{ctx}: unreachable kind '{kind}'")
 
 
@@ -136,16 +130,6 @@ def _parse_assertion(raw: dict, ctx: str) -> Any:
         _require_keys(raw, ["step"], ctx)
         return HttpStatusOk(kind="http_status_ok", step=raw["step"],
                             description=raw.get("description", ""))
-    if kind == "http_body_contains":
-        _require_keys(raw, ["step"], ctx)
-        if not raw.get("needle") and not raw.get("needle_artifact"):
-            raise ContractError(f"{ctx}: http_body_contains requires 'needle' or 'needle_artifact'")
-        return HttpBodyContains(
-            kind="http_body_contains", step=raw["step"],
-            needle=raw.get("needle"),
-            needle_artifact=raw.get("needle_artifact"),
-            description=raw.get("description", ""),
-        )
     if kind == "artifact_present":
         _require_keys(raw, ["artifact"], ctx)
         return ArtifactPresent(kind="artifact_present", artifact=raw["artifact"],
@@ -154,23 +138,25 @@ def _parse_assertion(raw: dict, ctx: str) -> Any:
         _require_keys(raw, ["step"], ctx)
         return ContentServesNonce(kind="content_serves_nonce", step=raw["step"],
                                    description=raw.get("description", ""))
-    if kind == "auth_still_valid":
-        _require_keys(raw, ["step"], ctx)
-        return AuthStillValid(kind="auth_still_valid", step=raw["step"],
-                               description=raw.get("description", ""))
     raise ContractError(f"{ctx}: unreachable assertion kind '{kind}'")
 
 
 def _parse_test(raw: dict, ctx: str) -> TestSpec:
     if not isinstance(raw, dict):
         raise ContractError(f"{ctx}: test must be a dict")
-    _reject_unknown(raw, {"steps", "assertions"}, ctx)
+    _reject_unknown(raw, {"steps", "assertions", "produces", "requires"}, ctx)
     steps_raw = raw.get("steps", [])
     asserts_raw = raw.get("assertions", [])
+    produces_raw = raw.get("produces", []) or []
+    requires_raw = raw.get("requires", []) or []
     if not isinstance(steps_raw, list):
         raise ContractError(f"{ctx}.steps must be a list")
     if not isinstance(asserts_raw, list):
         raise ContractError(f"{ctx}.assertions must be a list")
+    if not isinstance(produces_raw, list):
+        raise ContractError(f"{ctx}.produces must be a list of state keys")
+    if not isinstance(requires_raw, list):
+        raise ContractError(f"{ctx}.requires must be a list of state keys")
 
     # Check step ids are unique
     ids = [s.get("id") for s in steps_raw if isinstance(s, dict)]
@@ -191,7 +177,30 @@ def _parse_test(raw: dict, ctx: str) -> TestSpec:
                 f"{ctx}.assertions[{i}] references step '{ref}' which is not in "
                 f"this test (available: {sorted(step_ids)})")
 
-    return TestSpec(steps=steps, assertions=assertions)
+    return TestSpec(steps=steps, assertions=assertions,
+                     produces=list(produces_raw), requires=list(requires_raw))
+
+
+def _validate_cross_test_dataflow(tests: dict[str, TestSpec], source: str) -> None:
+    """Every requires in persistence/workflow must be in signup's produces
+    (or in the same test's produces, for internally-wired state).
+    """
+    signup = tests.get("signup")
+    signup_produces = set(signup.produces) if signup else set()
+
+    for test_name in ("persistence", "workflow"):
+        t = tests.get(test_name)
+        if not t:
+            continue
+        own_produces = set(t.produces)
+        for req in t.requires:
+            if req not in signup_produces and req not in own_produces:
+                raise ContractError(
+                    f"{source}.tests.{test_name}.requires: '{req}' is not in "
+                    f"signup.produces {sorted(signup_produces)} or "
+                    f"{test_name}.produces {sorted(own_produces)}. Add it to "
+                    f"signup's produces, or have this test produce it itself "
+                    f"(e.g. via env_secret).")
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -208,10 +217,9 @@ def parse_contract(raw: dict, source: str = "<dict>") -> Contract:
         raise ContractError(f"{source}: unsupported schema_version {version} (need 1)")
 
     sandbox_raw = raw.get("sandbox", {}) or {}
-    _reject_unknown(sandbox_raw, {"url_allowlist", "shell_approved"}, f"{source}.sandbox")
+    _reject_unknown(sandbox_raw, {"url_allowlist"}, f"{source}.sandbox")
     sandbox = Sandbox(
         url_allowlist=list(sandbox_raw.get("url_allowlist", []) or []),
-        shell_approved=bool(sandbox_raw.get("shell_approved", False)),
     )
 
     tests_raw = raw.get("tests") or {}
@@ -225,6 +233,8 @@ def parse_contract(raw: dict, source: str = "<dict>") -> Contract:
     tests = {name: _parse_test(spec, f"{source}.tests.{name}")
              for name, spec in tests_raw.items()}
 
+    _validate_cross_test_dataflow(tests, source)
+
     return Contract(
         schema_version=1,
         service_slug=raw["service_slug"],
@@ -236,11 +246,7 @@ def parse_contract(raw: dict, source: str = "<dict>") -> Contract:
 
 
 def load_contract(slug: str, contracts_dir: Path | None = None) -> Contract | None:
-    """Load and parse the contract for `slug`. Returns None if no file exists.
-
-    Parse errors raise ContractError — a malformed contract should loudly fail
-    the verifier run, not silently fall back to legacy.
-    """
+    """Load and parse the contract for `slug`. Returns None if no file exists."""
     root = contracts_dir or CONTRACTS_DIR
     path = root / f"{slug}.json"
     if not path.exists():

@@ -4,24 +4,32 @@ A Contract describes three tests (signup, persistence, workflow). Each test is
 a sequence of Steps (HTTP calls, file uploads, etc.) followed by a sequence of
 Assertions that decide pass/fail against the recorded steps and state.
 
-The vocabulary is deliberately tiny. Extending it should require two different
-services to need the new primitive — otherwise we add inline logic somewhere
-instead of polluting the vocabulary.
+Tests declare `produces` (state keys they will write) and `requires` (state
+keys they will read). The loader cross-validates: every key a later test
+requires must appear in an earlier test's produces. This makes the data flow
+between tests explicit, loader-checkable, and no longer punned through
+convention.
 
-Step kinds (6):
-  - http          : one HTTP request; optional extraction into state
-  - put_file      : raw-bytes PUT (for presigned URLs)
-  - inject_nonce  : mint a unique nonce; store under state[key]
-  - env_secret    : load env var into state
-  - wait          : sleep N seconds (for async API propagation)
-  - shell         : escape hatch (requires contract.sandbox.shell_approved=true)
+The vocabulary is deliberately tiny (v1 post-critique):
+  Step kinds (5):
+    - http          : one HTTP request; optional extraction into state
+    - put_file      : raw-bytes PUT (for presigned URLs)
+    - inject_nonce  : mint a unique nonce; store under state[key]
+    - env_secret    : load env var into state (gated by contract.allowed_env)
+    - wait          : sleep N seconds (for async API propagation)
 
-Assertion kinds (5):
-  - http_status_ok       : named step's response status is 2xx
-  - http_body_contains   : step's body contains a literal or artifact value
-  - artifact_present     : named state artifact is non-empty
-  - content_serves_nonce : a step did a resilient GET and found the nonce
-  - auth_still_valid     : semantic alias — a step with credentials got 2xx
+  Assertion kinds (3):
+    - http_status_ok       : named step's response status is 2xx
+    - artifact_present     : named state artifact is non-empty
+    - content_serves_nonce : a step did a resilient GET and found the nonce
+
+The shell step, http_body_contains, and auth_still_valid from the v1.0 draft
+were removed in the post-critique revision: shell was speculative (no user),
+http_body_contains had zero usage, auth_still_valid was sugar for
+http_status_ok with cosmetically-different error text.
+
+Extraction syntax is JMESPath (https://jmespath.org/). Array indexing uses
+brackets: `upload.uploads[0].url`. Fallback chains use `||`.
 """
 from __future__ import annotations
 
@@ -29,25 +37,22 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-# ── Step kinds ────────────────────────────────────────────────────────────────
-
-StepKind = Literal["http", "put_file", "inject_nonce", "env_secret", "wait", "shell"]
+StepKind = Literal["http", "put_file", "inject_nonce", "env_secret", "wait"]
 
 
 @dataclass
 class HttpStep:
     """One HTTP request, optionally extracting named values from the response."""
     kind: Literal["http"]
-    id: str                                  # unique within the test; referenced by assertions
+    id: str                                  # unique within the test
     method: Literal["GET", "POST", "PUT", "DELETE", "PATCH"]
     url: str                                 # may contain {template} vars
     headers: dict[str, str] = field(default_factory=dict)
     body_json: Any = None                    # dict/list; templated recursively
     body_raw: str | None = None              # used when body isn't JSON (templated)
     extract: dict[str, str] = field(default_factory=dict)
-    # Extract map: state_key -> JSONPath-ish expression. Supports
-    # dotted paths with numeric indices and `||` fallback chains.
-    # e.g. "upload.uploads.0.url || files.0.uploadUrl"
+    # Extract map: state_key -> JMESPath expression. Fallback chains with ||.
+    # e.g. "upload.uploads[0].url || files[0].uploadUrl"
     browser_fallback: bool = False           # if GET fails/blocked, escalate to curl_cffi
     must_contain_artifact: str | None = None # when browser_fallback=true, require nonce match
     description: str = ""                    # human-readable step label
@@ -98,20 +103,7 @@ class WaitStep:
     seconds: float
 
 
-@dataclass
-class ShellStep:
-    """Escape hatch. Disabled unless contract.sandbox.shell_approved == true.
-
-    Not implemented in v1 — reserved so the schema doesn't need to change
-    when we first encounter a service that genuinely needs it.
-    """
-    kind: Literal["shell"]
-    id: str
-    command: str
-    timeout_s: float = 30.0
-
-
-Step = HttpStep | PutFileStep | InjectNonceStep | EnvSecretStep | WaitStep | ShellStep
+Step = HttpStep | PutFileStep | InjectNonceStep | EnvSecretStep | WaitStep
 
 
 # ── Assertion kinds ───────────────────────────────────────────────────────────
@@ -120,15 +112,6 @@ Step = HttpStep | PutFileStep | InjectNonceStep | EnvSecretStep | WaitStep | She
 class HttpStatusOk:
     kind: Literal["http_status_ok"]
     step: str                                # step id
-    description: str = ""
-
-
-@dataclass
-class HttpBodyContains:
-    kind: Literal["http_body_contains"]
-    step: str
-    needle: str | None = None                # literal to search for
-    needle_artifact: str | None = None       # or state key holding the value
     description: str = ""
 
 
@@ -145,7 +128,7 @@ class ContentServesNonce:
 
     This is the one compound assertion. It exists because "fetch a URL with
     escalation and verify our content served" is the only way to verify
-    content-publishing services honestly — and encoding it as three separate
+    content-publishing services honestly — encoding it as three separate
     primitives (fetch + status_ok + body_contains) makes contracts unreadable.
     """
     kind: Literal["content_serves_nonce"]
@@ -153,19 +136,7 @@ class ContentServesNonce:
     description: str = ""
 
 
-@dataclass
-class AuthStillValid:
-    """Semantic alias for http_status_ok when the step uses stored credentials.
-
-    Generates clearer failure messages ('API key rejected' vs 'HTTP non-2xx').
-    """
-    kind: Literal["auth_still_valid"]
-    step: str
-    description: str = ""
-
-
-Assertion = (HttpStatusOk | HttpBodyContains | ArtifactPresent
-             | ContentServesNonce | AuthStillValid)
+Assertion = HttpStatusOk | ArtifactPresent | ContentServesNonce
 
 
 # ── Top-level ─────────────────────────────────────────────────────────────────
@@ -174,18 +145,33 @@ Assertion = (HttpStatusOk | HttpBodyContains | ArtifactPresent
 class TestSpec:
     steps: list[Step]
     assertions: list[Assertion]
+    # Data-flow declarations. The loader verifies at load time that:
+    #   - every key in `requires` appears in an earlier test's `produces`
+    #   - (advisory) every key in `produces` is actually written by at least
+    #     one step's `extract` block or inject_nonce/env_secret step
+    produces: list[str] = field(default_factory=list)
+    requires: list[str] = field(default_factory=list)
 
 
 @dataclass
 class Sandbox:
     """Security constraints for this contract.
 
-    url_allowlist: step URLs must match one of these host patterns after
-      template substitution. Wildcards: '*.example.com' matches any subdomain.
-    shell_approved: must be explicitly true to allow ShellStep execution.
+    url_allowlist: step URLs must match one of these host patterns. Wildcards:
+      '*.example.com' matches any subdomain. An EMPTY allowlist fails closed —
+      no URL is permitted. This is a change from the v1.0 draft (which treated
+      empty as "no restriction, development mode") because that interpretation
+      was security-theater code that lied to readers.
+
+    NOTE: this check is a speed bump, not a real sandbox. It does not block:
+      - IP literals (169.254.169.254, 127.0.0.1)
+      - non-http schemes via curl_cffi
+      - oversized request bodies
+      - per-domain rate limits
+    Real sandboxing lives in Phase 3. Until then, treat this allowlist as a
+    typo-prevention check, not a security boundary.
     """
     url_allowlist: list[str] = field(default_factory=list)
-    shell_approved: bool = False
 
 
 @dataclass

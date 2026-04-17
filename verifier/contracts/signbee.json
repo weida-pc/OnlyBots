@@ -4,11 +4,11 @@
   "notes": "Uses a pre-provisioned SIGNBEE_API_KEY (no programmatic signup — sender identity needs email OTP). With the API key, sends a document and verifies the API accepted it. Persistence sends a second document to prove the key still works.",
   "allowed_env": ["SIGNBEE_API_KEY"],
   "sandbox": {
-    "url_allowlist": ["signb.ee"],
-    "shell_approved": false
+    "url_allowlist": ["signb.ee"]
   },
   "tests": {
     "signup": {
+      "produces": ["signbee_api_key", "signbee_document_id"],
       "steps": [
         {
           "kind": "env_secret",
@@ -40,14 +40,8 @@
       ]
     },
     "persistence": {
+      "requires": ["signbee_api_key"],
       "steps": [
-        {
-          "kind": "env_secret",
-          "id": "load_key",
-          "env_var": "SIGNBEE_API_KEY",
-          "state_key": "signbee_api_key",
-          "required": true
-        },
         {
           "kind": "http",
           "id": "send_again",
@@ -63,18 +57,14 @@
         }
       ],
       "assertions": [
-        {"kind": "auth_still_valid", "step": "send_again"}
+        {"kind": "http_status_ok", "step": "send_again",
+         "description": "credential still valid"}
       ]
     },
     "workflow": {
+      "requires": ["signbee_api_key"],
+      "produces": ["signbee_workflow_doc_id"],
       "steps": [
-        {
-          "kind": "env_secret",
-          "id": "load_key",
-          "env_var": "SIGNBEE_API_KEY",
-          "state_key": "signbee_api_key",
-          "required": true
-        },
         {
           "kind": "http",
           "id": "send_workflow",

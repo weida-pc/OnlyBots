@@ -4,11 +4,11 @@
   "notes": "Anonymous publish-to-URL service. No accounts. 'Persistence' means the published URL keeps serving our content. Each test injects a fresh nonce and verifies it appears in the live response body via resilient GET (plain http → curl_cffi Chrome fallback).",
   "allowed_env": [],
   "sandbox": {
-    "url_allowlist": ["here.now", "*.here.now", "*.r2.cloudflarestorage.com"],
-    "shell_approved": false
+    "url_allowlist": ["here.now", "*.here.now", "*.r2.cloudflarestorage.com"]
   },
   "tests": {
     "signup": {
+      "produces": ["herenow_site_url", "herenow_nonce"],
       "steps": [
         {
           "kind": "inject_nonce",
@@ -26,8 +26,8 @@
           },
           "extract": {
             "herenow_site_url": "siteUrl || site_url || url",
-            "herenow_upload_url": "upload.uploads.0.url || files.0.uploadUrl || files.0.url",
-            "herenow_upload_ct": "upload.uploads.0.headers.Content-Type",
+            "herenow_upload_url": "upload.uploads[0].url || files[0].uploadUrl || files[0].url",
+            "herenow_upload_ct": "upload.uploads[0].headers.\"Content-Type\"",
             "herenow_finalize_url": "upload.finalizeUrl || finalizeUrl || finalize_url",
             "herenow_version_id": "upload.versionId || versionId || version_id"
           }
@@ -65,6 +65,7 @@
       ]
     },
     "persistence": {
+      "requires": ["herenow_site_url", "herenow_nonce"],
       "steps": [
         {
           "kind": "http",
@@ -80,6 +81,7 @@
       ]
     },
     "workflow": {
+      "produces": ["herenow_site_url", "herenow_nonce"],
       "steps": [
         {
           "kind": "inject_nonce",
@@ -97,8 +99,8 @@
           },
           "extract": {
             "herenow_site_url": "siteUrl || site_url || url",
-            "herenow_upload_url": "upload.uploads.0.url || files.0.uploadUrl || files.0.url",
-            "herenow_upload_ct": "upload.uploads.0.headers.Content-Type",
+            "herenow_upload_url": "upload.uploads[0].url || files[0].uploadUrl || files[0].url",
+            "herenow_upload_ct": "upload.uploads[0].headers.\"Content-Type\"",
             "herenow_finalize_url": "upload.finalizeUrl || finalizeUrl || finalize_url",
             "herenow_version_id": "upload.versionId || versionId || version_id"
           }

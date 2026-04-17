@@ -4,11 +4,11 @@
   "notes": "POST /api/v1/agents/register returns an API key instantly (true programmatic signup). The workflow test uses a pre-claimed MOLTBOOK_API_KEY from env because un-claimed accounts can't post (one-time human claim gate is a separate ownership layer, not a signup blocker).",
   "allowed_env": ["MOLTBOOK_API_KEY"],
   "sandbox": {
-    "url_allowlist": ["www.moltbook.com", "moltbook.com"],
-    "shell_approved": false
+    "url_allowlist": ["www.moltbook.com", "moltbook.com"]
   },
   "tests": {
     "signup": {
+      "produces": ["moltbook_api_key"],
       "steps": [
         {
           "kind": "inject_nonce",
@@ -38,6 +38,7 @@
       ]
     },
     "persistence": {
+      "requires": ["moltbook_api_key"],
       "steps": [
         {
           "kind": "http",
@@ -49,10 +50,12 @@
         }
       ],
       "assertions": [
-        {"kind": "auth_still_valid", "step": "get_me"}
+        {"kind": "http_status_ok", "step": "get_me",
+         "description": "credential still valid"}
       ]
     },
     "workflow": {
+      "produces": ["moltbook_api_key", "moltbook_post_id"],
       "steps": [
         {
           "kind": "env_secret",

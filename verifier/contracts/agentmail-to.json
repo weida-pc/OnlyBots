@@ -4,11 +4,11 @@
   "notes": "Native API signup: POST /v0/agent/sign-up returns api_key + inbox_id. Persistence proven by GET /v0/inboxes with bearer. Workflow sends email to pre-allowed human_email (sudo@pressclub.app) and lists inbox to confirm it's operational.",
   "allowed_env": [],
   "sandbox": {
-    "url_allowlist": ["api.agentmail.to"],
-    "shell_approved": false
+    "url_allowlist": ["api.agentmail.to"]
   },
   "tests": {
     "signup": {
+      "produces": ["agentmail_api_key", "agentmail_inbox_id"],
       "steps": [
         {
           "kind": "inject_nonce",
@@ -39,6 +39,7 @@
       ]
     },
     "persistence": {
+      "requires": ["agentmail_api_key"],
       "steps": [
         {
           "kind": "http",
@@ -50,10 +51,12 @@
         }
       ],
       "assertions": [
-        {"kind": "auth_still_valid", "step": "list_inboxes"}
+        {"kind": "http_status_ok", "step": "list_inboxes",
+         "description": "credential still valid"}
       ]
     },
     "workflow": {
+      "requires": ["agentmail_api_key", "agentmail_inbox_id"],
       "steps": [
         {
           "kind": "http",
