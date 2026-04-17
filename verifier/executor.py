@@ -11,7 +11,16 @@ import json
 import os
 import time
 import urllib.parse
+import uuid
 from typing import Any
+
+# Browser-fingerprint HTTP client (bypasses Cloudflare bot-detection).
+# Falls back gracefully if the package isn't installed.
+try:
+    from curl_cffi import requests as curl_requests  # type: ignore
+    HAS_CURL_CFFI = True
+except Exception:
+    HAS_CURL_CFFI = False
 
 
 # ── Low-level HTTP helpers ───────────────────────────────────────────────────
@@ -57,6 +66,79 @@ def http_post(url: str, body: dict, headers: dict | None = None, timeout: int = 
 
 def http_get(url: str, headers: dict | None = None, timeout: int = 30) -> dict:
     return _http_request("GET", url, headers=headers, timeout=timeout)
+
+
+def http_get_browser(url: str, timeout: int = 30) -> dict:
+    """GET with a real browser TLS/JA3 fingerprint.
+
+    Uses curl_cffi (libcurl with Chrome impersonation) so Cloudflare and similar
+    bot-detection systems see a realistic client. Falls back to plain http_get
+    if curl_cffi is not installed, so the verifier still runs in development.
+    """
+    if not HAS_CURL_CFFI:
+        r = http_get(url, timeout=timeout)
+        r["via"] = "http.client (curl_cffi unavailable)"
+        return r
+
+    t0 = time.time()
+    try:
+        resp = curl_requests.get(url, impersonate="chrome124", timeout=timeout)
+        return {
+            "status": resp.status_code,
+            "body": resp.text,
+            "elapsed_ms": round((time.time() - t0) * 1000),
+            "error": None,
+            "via": "curl_cffi/chrome124",
+        }
+    except Exception as e:
+        return {
+            "status": 0,
+            "body": "",
+            "elapsed_ms": round((time.time() - t0) * 1000),
+            "error": str(e),
+            "via": "curl_cffi/chrome124",
+        }
+
+
+def http_get_resilient(url: str, must_contain: str = "", timeout: int = 30) -> dict:
+    """GET that escalates from plain HTTP to browser TLS when needed.
+
+    Strategy:
+      1. Try plain http_get (fast, cheap).
+      2. If status is non-2xx OR (must_contain is set and not found in body),
+         escalate to http_get_browser (browser TLS fingerprint).
+      3. Return the best attempt, annotated with `via`, `attempts`, and
+         `nonce_found` (if must_contain was provided).
+
+    A 200 with a Cloudflare JS-challenge page is still a failure when
+    must_contain is set — the marker acts as proof the real content was served.
+    """
+    attempts = []
+
+    r1 = http_get(url, timeout=timeout)
+    r1["via"] = r1.get("via", "http.client")
+    r1_ok = 200 <= r1.get("status", 0) < 300
+    r1_has_marker = (not must_contain) or (must_contain in r1.get("body", ""))
+    attempts.append({"via": r1["via"], "status": r1.get("status"),
+                     "marker_found": r1_has_marker})
+
+    if r1_ok and r1_has_marker:
+        r1["attempts"] = attempts
+        r1["nonce_found"] = r1_has_marker if must_contain else None
+        return r1
+
+    # Escalate
+    r2 = http_get_browser(url, timeout=timeout)
+    r2_ok = 200 <= r2.get("status", 0) < 300
+    r2_has_marker = (not must_contain) or (must_contain in r2.get("body", ""))
+    attempts.append({"via": r2.get("via", "curl_cffi"), "status": r2.get("status"),
+                     "marker_found": r2_has_marker})
+
+    # Prefer the browser attempt if it found the marker, else return it anyway
+    # since it carries richer failure information than a blocked http.client.
+    r2["attempts"] = attempts
+    r2["nonce_found"] = r2_has_marker if must_contain else None
+    return r2
 
 
 def http_put(url: str, body: str | bytes, content_type: str = "application/octet-stream",
@@ -195,8 +277,20 @@ def workflow_agentmail(state: dict) -> list[dict]:
 
 
 def signup_herenow(state: dict) -> list[dict]:
-    """Publish a test page on here.now."""
-    html_content = "<html><body><h1>OnlyBots Verification Test</h1></body></html>"
+    """Publish a test page on here.now.
+
+    Injects a unique nonce into the published HTML so later verification can
+    prove our specific content was served — not just that *some* 200 came back.
+    """
+    nonce = f"onlybots-verify-{uuid.uuid4().hex[:16]}"
+    state["herenow_nonce"] = nonce
+    html_content = (
+        "<html><body>"
+        "<h1>OnlyBots Verification Test</h1>"
+        f"<!-- verify-nonce: {nonce} -->"
+        f"<p data-onlybots-nonce=\"{nonce}\">{nonce}</p>"
+        "</body></html>"
+    )
     html_bytes = html_content.encode("utf-8")
     steps = []
 
@@ -211,25 +305,32 @@ def signup_herenow(state: dict) -> list[dict]:
     steps.append(step1)
 
     upload_url = None
+    upload_headers = None
     finalize_url = None
     version_id = None
     try:
         data = json.loads(r1["body"])
-        files = data.get("files", [])
-        if files:
-            upload_url = files[0].get("uploadUrl") or files[0].get("url")
-        finalize_url = data.get("finalizeUrl") or data.get("finalize_url")
-        version_id = data.get("versionId") or data.get("version_id")
         state["herenow_site_url"] = data.get("siteUrl") or data.get("site_url") or data.get("url")
+        # Current API (2026): nested under `upload`
+        upload = data.get("upload") or {}
+        uploads = upload.get("uploads") or data.get("files") or []
+        if uploads:
+            upload_url = uploads[0].get("url") or uploads[0].get("uploadUrl")
+            upload_headers = uploads[0].get("headers") or None
+        finalize_url = (upload.get("finalizeUrl") or data.get("finalizeUrl")
+                         or data.get("finalize_url"))
+        version_id = (upload.get("versionId") or data.get("versionId")
+                       or data.get("version_id"))
     except Exception:
         pass
 
     if not upload_url:
         return steps
 
-    # 2. Upload HTML content
+    # 2. Upload HTML content — use the exact Content-Type the API specified.
+    put_content_type = (upload_headers or {}).get("Content-Type", "text/html")
     step2 = {"step": "PUT presigned upload URL (upload index.html)"}
-    r2 = http_put(upload_url, html_bytes, content_type="text/html; charset=utf-8")
+    r2 = http_put(upload_url, html_bytes, content_type=put_content_type)
     step2.update(r2)
     steps.append(step2)
 
@@ -252,27 +353,35 @@ def signup_herenow(state: dict) -> list[dict]:
     except Exception:
         pass
 
-    # 4. Verify live URL
+    # 4. Verify live URL — check that our nonce is actually in the response.
+    #    Escalates from plain HTTP to browser TLS fingerprint if needed.
     site_url = state.get("herenow_site_url")
     if site_url:
-        step4 = {"step": f"GET {site_url} (verify live)"}
-        r4 = http_get(site_url)
+        step4 = {"step": f"GET {site_url} (verify live + nonce)"}
+        r4 = http_get_resilient(site_url, must_contain=nonce)
         step4.update(r4)
         steps.append(step4)
-        # Store result so persistence test can reference it
         state["herenow_site_live_status"] = r4.get("status", 0)
+        state["herenow_nonce_verified"] = bool(r4.get("nonce_found"))
 
     return steps
 
 
 def persist_herenow(state: dict) -> list[dict]:
-    """Verify the published here.now page still exists."""
-    site_url = state.get("herenow_site_url")
-    if not site_url:
-        return [{"step": "GET here.now site (no URL from signup)", "status": 0, "body": "", "elapsed_ms": 0, "error": "No site URL in state"}]
+    """Verify the published here.now page still serves our specific content.
 
-    step = {"step": f"GET {site_url} (verify persistence)"}
-    resp = http_get(site_url)
+    Passes only if the unique nonce injected at signup appears in the response
+    body — proves the content persisted, not just that the URL is reachable.
+    """
+    site_url = state.get("herenow_site_url")
+    nonce = state.get("herenow_nonce", "")
+    if not site_url:
+        return [{"step": "GET here.now site (no URL from signup)",
+                 "status": 0, "body": "", "elapsed_ms": 0,
+                 "error": "No site URL in state"}]
+
+    step = {"step": f"GET {site_url} (verify persistence + nonce)"}
+    resp = http_get_resilient(site_url, must_contain=nonce)
     step.update(resp)
     return [step]
 
@@ -639,22 +748,33 @@ def verdict_signup(slug: str, steps: list[dict], state: dict) -> dict:
             return {"passed": False, "confidence": 0.9,
                     "reason": "Publish returned 200 but no siteUrl extracted",
                     "blocker": "no siteUrl"}
-        # Check if the live URL is accessible (step 4 if present)
+
+        # The live-check step must return our nonce — that proves our specific
+        # content was actually served, not just that some HTTP response came back.
+        nonce = state.get("herenow_nonce", "")
         live_step = next((s for s in steps if "verify live" in s.get("step", "")), None)
-        if live_step and _ok(live_step):
+        nonce_found = bool(live_step and live_step.get("nonce_found"))
+        via = live_step.get("via", "?") if live_step else "?"
+
+        if nonce_found:
             return {"passed": True, "confidence": 1.0,
-                    "reason": f"Published to {site_url} and live URL returned HTTP {live_step['status']}.",
+                    "reason": f"Published to {site_url}. Live URL returned HTTP {live_step['status']} via {via} and response body contains our unique nonce — confirms our content was served.",
                     "blocker": None}
-        elif live_step:
-            # Cloudflare may block but site IS published
-            if live_step.get("status") == 403:
-                return {"passed": True, "confidence": 0.85,
-                        "reason": f"Published to {site_url}. Live URL returns 403 (Cloudflare bot-check blocks direct HTTP client, but site was published successfully).",
-                        "blocker": None}
-        # No live check step — just confirm publish succeeded
-        return {"passed": True, "confidence": 0.9,
-                "reason": f"Publish workflow completed. siteUrl={site_url}",
-                "blocker": None}
+
+        if live_step and _ok(live_step):
+            # 200 but no nonce — Cloudflare challenge page, CDN cache miss, or content not yet live.
+            return {"passed": False, "confidence": 0.9,
+                    "reason": f"Published to {site_url} but live URL returned HTTP {live_step['status']} without our nonce in the body. Content was not actually served (likely Cloudflare challenge page or stale CDN).",
+                    "blocker": "nonce not found in response body"}
+
+        if live_step and live_step.get("status") == 403:
+            return {"passed": False, "confidence": 0.9,
+                    "reason": f"Published to {site_url} but live URL returns 403 even with browser TLS fingerprint (via {via}). Cannot verify our content was served.",
+                    "blocker": "Cloudflare 403 persists through curl_cffi"}
+
+        return {"passed": False, "confidence": 0.9,
+                "reason": f"Published to {site_url} but could not verify live content. Live step: {live_step}",
+                "blocker": "live verification inconclusive"}
 
     elif slug == "moltbook":
         s = steps[0]
@@ -749,28 +869,32 @@ def verdict_persist(slug: str, steps: list[dict], state: dict) -> dict:
     elif slug == "here-now":
         s = steps[0]
         site_url = state.get("herenow_site_url", "unknown")
-        if _ok(s):
+        nonce = state.get("herenow_nonce", "")
+        via = s.get("via", "?")
+        nonce_found = bool(s.get("nonce_found"))
+
+        # here.now is anonymous publishing — no accounts, no credentials.
+        # "Persistence" here means: does the published URL still serve our content?
+        # Our content == our unique nonce in the response body.
+
+        if nonce_found:
             return {"passed": True, "confidence": 1.0,
-                    "reason": f"Published site at {site_url} still accessible (HTTP {s['status']}).",
+                    "reason": f"Published site at {site_url} still serves our content — nonce confirmed in response (HTTP {s['status']} via {via}).",
                     "blocker": None}
+
+        if _ok(s):
+            # 200 but no nonce — content is gone (expired) or a different page is served.
+            return {"passed": False, "confidence": 0.95,
+                    "reason": f"Site at {site_url} returns HTTP {s['status']} via {via} but our nonce is not in the response body. Content did not persist.",
+                    "blocker": "nonce missing from response"}
+
         if s.get("status") == 403:
-            # Cloudflare blocks the Python HTTP client on re-check.
-            # here.now has no account or credentials — persistence means the URL stays live.
-            # Only pass if signup already confirmed the site was accessible (HTTP 200).
-            signup_status = state.get("herenow_site_live_status", 0)
-            if signup_status == 200:
-                return {"passed": True, "confidence": 0.75,
-                        "reason": f"Site at {site_url} confirmed live immediately after publish (HTTP 200 during signup). "
-                                  f"Re-verification blocked by Cloudflare (403). here.now has no account credentials — "
-                                  f"persistence is defined as the URL remaining live, which was confirmed at publish time.",
-                        "blocker": None}
             return {"passed": False, "confidence": 0.9,
-                    "reason": f"Site at {site_url} returns 403 on re-check (Cloudflare bot-detection). "
-                              f"Signup did not confirm the site was live (signup status: {signup_status}). "
-                              f"Cannot verify persistence.",
-                    "blocker": "Cloudflare bot-detection (403)"}
+                    "reason": f"Site at {site_url} returns 403 even with browser TLS fingerprint (via {via}). Cannot verify persistence through any HTTP path available to the verifier.",
+                    "blocker": "Cloudflare 403 persists through curl_cffi"}
+
         return {"passed": False, "confidence": 1.0,
-                "reason": f"Site URL {site_url} returned HTTP {s['status']}",
+                "reason": f"Site URL {site_url} returned HTTP {s['status']} via {via}; nonce not found.",
                 "blocker": f"HTTP {s['status']}"}
 
     elif slug == "moltbook":
