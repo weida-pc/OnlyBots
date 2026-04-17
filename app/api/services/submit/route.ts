@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { checkDuplicateUrl, createService, createVerificationRun } from "@/lib/db";
+import { checkDuplicateUrl, createService } from "@/lib/db";
 import { submitServiceSchema } from "@/lib/schema";
+import {
+  generateVerificationToken,
+  hostnameForUrl,
+  txtRecordName,
+  expectedTxtValue,
+} from "@/lib/domain-verification";
 
 interface RateLimitEntry {
   count: number;
@@ -80,13 +86,31 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const service = await createService(data);
-  await createVerificationRun(service.id);
+  // Phase 6: domain ownership verification gate. Don't queue a verification
+  // run yet — wait for the submitter to publish the TXT record and call
+  // POST /api/services/:slug/verify-domain.
+  const token = generateVerificationToken();
+  const service = await createService({ ...data, domain_verification_token: token });
 
+  const hostname = hostnameForUrl(service.url);
   return NextResponse.json(
     {
       service,
-      message: "Service submitted and queued for verification",
+      message:
+        "Service submitted. Before verification runs, prove domain ownership " +
+        "by publishing a TXT record and calling /api/services/:slug/verify-domain.",
+      domain_verification: {
+        status: "pending",
+        record_name: txtRecordName(hostname),
+        record_value: expectedTxtValue(token),
+        record_type: "TXT",
+        instructions:
+          `Add a DNS TXT record on "${txtRecordName(hostname)}" with the ` +
+          `value "${expectedTxtValue(token)}". Then POST to ` +
+          `/api/services/${service.slug}/verify-domain. The verifier will ` +
+          `not run until this step succeeds.`,
+        verify_url: `/api/services/${service.slug}/verify-domain`,
+      },
     },
     {
       status: 201,

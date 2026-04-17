@@ -80,6 +80,7 @@ class InjectNonceStep:
     id: str
     state_key: str                           # where to store the nonce
     prefix: str = "onlybots-verify"          # nonce format: {prefix}-{hex16}
+    description: str = ""
 
 
 @dataclass
@@ -94,6 +95,7 @@ class EnvSecretStep:
     env_var: str                             # e.g. MOLTBOOK_API_KEY
     state_key: str                           # where to store the value
     required: bool = True                    # if false, missing env var is not an error
+    description: str = ""
 
 
 @dataclass
@@ -101,6 +103,7 @@ class WaitStep:
     kind: Literal["wait"]
     id: str
     seconds: float
+    description: str = ""
 
 
 Step = HttpStep | PutFileStep | InjectNonceStep | EnvSecretStep | WaitStep

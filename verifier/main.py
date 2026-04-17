@@ -20,6 +20,7 @@ from config import POLL_INTERVAL_SECONDS, VERIFIER_VERSION, HARNESSES
 from db import (
     fetch_pending_runs, save_test_result, complete_run,
     update_service_status, retry_failed_services,
+    queue_drift_check, find_drifted_services,
 )
 from evidence import get_evidence_dir
 from tests.test_signup import TestSignup
@@ -100,6 +101,14 @@ async def verify_service(run: dict) -> None:
         complete_run(run_id, "passed", str(evidence_dir))
         print(f"[verifier] {run['name']}: VERIFIED ✓")
     else:
+        # Drift signal: if the service was previously 'verified' and this run
+        # failed, log a distinct line so ops can grep for regressions.
+        was_verified = run.get("status_before_this_run") == "verified"
+        # (status_before_this_run is the service's status at the moment we
+        # fetched the run, before update_service_status flips it to 'failed')
+        if was_verified:
+            print(f"[verifier] {run['name']}: DRIFT DETECTED — "
+                  f"previously verified, now failing at step {failed_at_step}")
         update_service_status(service_id, "failed", failed_at_step, None)
         complete_run(run_id, "failed", str(evidence_dir))
         print(f"[verifier] {run['name']}: FAILED at step {failed_at_step} ✗")
@@ -150,12 +159,36 @@ def main():
     print()
 
     retry = "--retry-failed" in sys.argv
-    once = "--once" in sys.argv or retry
+    drift = "--drift-check" in sys.argv
+    list_drift = "--list-drift" in sys.argv
+    once = "--once" in sys.argv or retry or drift
+
+    if list_drift:
+        drifted = find_drifted_services()
+        if not drifted:
+            print("[verifier] No drifted services (all latest runs match prior passing state).")
+        else:
+            print(f"[verifier] {len(drifted)} drifted service(s) — previously passed, now failing:")
+            for d in drifted:
+                print(f"  - {d['slug']:20s} last failed at {d['latest_failed_at']}")
+        return
 
     if retry:
         print("[verifier] Re-queuing failed services...")
         count = retry_failed_services()
         print(f"[verifier] Re-queued {count} service(s)")
+
+    if drift:
+        # Phase 4: re-run verified services whose last check is stale.
+        # Intended to be run on a schedule (cron / systemd timer).
+        staleness = 24
+        for arg in sys.argv:
+            if arg.startswith("--staleness-hours="):
+                staleness = int(arg.split("=", 1)[1])
+        print(f"[verifier] Drift check: queuing re-runs for services stale >{staleness}h...")
+        count = queue_drift_check(staleness_hours=staleness,
+                                   verifier_version=VERIFIER_VERSION)
+        print(f"[verifier] Queued {count} drift-check run(s)")
 
     if once:
         print("[verifier] Running single poll...")

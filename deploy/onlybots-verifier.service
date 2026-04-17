@@ -8,11 +8,33 @@ User=onlybots
 Group=onlybots
 WorkingDirectory=/opt/onlybots/verifier
 EnvironmentFile=/opt/onlybots/.env
+EnvironmentFile=/opt/onlybots/verifier/.env
 ExecStart=/opt/onlybots/verifier/venv/bin/python main.py
 Restart=always
 RestartSec=30
+
+# ── Phase 3 sandbox ─────────────────────────────────────────────────────────
+# Threat: the agent runtime runs `gemini --yolo` which gives the LLM shell
+# access. The Python-layer URL allowlist is bypassable by shelling out curl.
+# These systemd directives enforce the security boundary at the kernel layer.
+
+# Block egress to GCP metadata (169.254.169.254) and all RFC1918/CGNAT/link-
+# local ranges. Loopback is still allowed so the verifier can reach local
+# PostgreSQL. Public internet unaffected.
+IPAddressDeny=169.254.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10
+IPAddressAllow=127.0.0.0/8 ::1/128
+
+# Limit socket families to what the verifier actually uses (IPv4, IPv6,
+# UNIX). Prevents the agent from opening AF_PACKET / raw sockets, AF_NETLINK
+# for arbitrary kernel comms, AF_BLUETOOTH, etc.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Standard hardening
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
 
 [Install]
 WantedBy=multi-user.target

@@ -9,33 +9,24 @@
   "tests": {
     "signup": {
       "produces": ["signbee_api_key", "signbee_document_id"],
+      "agent_task": {
+        "prompt": "Send a test document via Signbee autonomously. Signbee is a programmatic e-signing service for AI agents. There is no programmatic signup (sender identity requires email OTP), so the verifier pre-provisions an API key and gives it to you:\n\n    SIGNBEE_API_KEY = {signbee_api_key}\n\nThe send endpoint is POST https://signb.ee/api/v1/send with header Authorization: Bearer <api_key> and JSON body:\n\n  {\n    \"recipient_name\": \"OnlyBots Verifier\",\n    \"recipient_email\": \"sudo@pressclub.app\",\n    \"markdown\": \"# OnlyBots Verification\\n\\nAutomated test document.\"\n  }\n\nThe response is JSON containing \"document_id\" (or \"id\"). Execute the send and report the document_id.",
+        "expected_artifacts": ["signbee_document_id"],
+        "model": "gemini-2.5-flash",
+        "timeout_s": 120
+      },
       "steps": [
         {
           "kind": "env_secret",
           "id": "load_key",
           "env_var": "SIGNBEE_API_KEY",
           "state_key": "signbee_api_key",
-          "required": true
-        },
-        {
-          "kind": "http",
-          "id": "send",
-          "method": "POST",
-          "url": "https://signb.ee/api/v1/send",
-          "headers": {"Authorization": "Bearer {signbee_api_key}"},
-          "body_json": {
-            "recipient_name": "OnlyBots Verifier",
-            "recipient_email": "sudo@pressclub.app",
-            "markdown": "# OnlyBots Verification Document\n\nThis document verifies that Signbee supports autonomous document workflows for AI agents registered in the OnlyBots trust registry.\n\n## Scope\n\nThis is an automated verification-only test document."
-          },
-          "extract": {
-            "signbee_document_id": "document_id || id"
-          },
-          "description": "POST /api/v1/send"
+          "required": true,
+          "description": "Load SIGNBEE_API_KEY so the agent prompt can reference it"
         }
       ],
       "assertions": [
-        {"kind": "http_status_ok", "step": "send"},
+        {"kind": "artifact_present", "artifact": "signbee_api_key"},
         {"kind": "artifact_present", "artifact": "signbee_document_id"}
       ]
     },

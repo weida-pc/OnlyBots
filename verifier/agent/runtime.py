@@ -46,14 +46,31 @@ class AgentRunResult:
     error: str | None = None
     model: str = ""
     exit_code: int | None = None
+    # Populated by the public `run_agent_task` retry loop — lets callers see
+    # how many attempts were made and what each attempt's status was.
+    attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _build_prompt(task_prompt: str, expected_artifacts: list[str]) -> str:
-    """Wrap the caller's task prompt with explicit output format instructions."""
+def _build_prompt(task_prompt: str, expected_artifacts: list[str],
+                   reminder: bool = False) -> str:
+    """Wrap the caller's task prompt with explicit output format instructions.
+
+    On retry (reminder=True), leads with a terse reminder that the prior
+    attempt didn't produce the required format — pushes the model to prioritize
+    emitting the ARTIFACTS block even if it has to cut its reasoning short.
+    """
     keys_display = "\n".join(f"  - {k}" for k in expected_artifacts)
     keys_template = ", ".join(f'"{k}": "..."' for k in expected_artifacts)
+    preamble = ""
+    if reminder:
+        preamble = (
+            "IMPORTANT: the previous attempt did not produce the required "
+            "final `ARTIFACTS: {...}` line. Complete the task and make SURE "
+            "to emit the final line in the exact required format before you "
+            "stop.\n\n"
+        )
     return (
-        f"{task_prompt}\n\n"
+        f"{preamble}{task_prompt}\n\n"
         f"When you have completed the task (successfully or not), output one "
         f"final line in EXACTLY this format (single line, ARTIFACTS: prefix, "
         f"valid JSON):\n\n"
@@ -104,13 +121,50 @@ def run_agent_task(
     model: str = "gemini-2.5-flash",
     timeout_s: int = 180,
     cwd: str = "/tmp",
+    max_retries: int = 1,
 ) -> AgentRunResult:
     """Invoke Gemini CLI with the task prompt; parse the ARTIFACTS report.
 
-    No retries in v1. If you need retry-on-malformed, call this twice from
-    the caller with different prompt variants.
+    Retries up to `max_retries` times on malformed/missing output. Observed
+    in the wild: ~1 in 3 runs on complex multi-step tasks (e.g. here-now's
+    publish/upload/finalize flow) finish without emitting the final
+    ARTIFACTS block within the initial timeout. A single retry with a
+    reminder prompt closes this gap.
+
+    Retries do NOT happen for timeout/cli_missing/error — those are
+    infrastructure issues and retry won't help.
     """
-    full_prompt = _build_prompt(prompt, expected_artifacts)
+    attempt = 0
+    last: AgentRunResult | None = None
+    while True:
+        result = _run_once(prompt, expected_artifacts, model, timeout_s, cwd,
+                            reminder=(attempt > 0))
+        attempt_info = {
+            "attempt": attempt + 1,
+            "status": result.status,
+            "elapsed_s": result.elapsed_s,
+        }
+        result.attempts = [*(last.attempts if last else []), attempt_info]
+        if result.status == "ok":
+            return result
+        # Retry only on soft failures (agent produced output but wrong shape)
+        if result.status in ("malformed", "missing_keys") and attempt < max_retries:
+            attempt += 1
+            last = result
+            continue
+        return result
+
+
+def _run_once(
+    prompt: str,
+    expected_artifacts: list[str],
+    model: str,
+    timeout_s: int,
+    cwd: str,
+    reminder: bool = False,
+) -> AgentRunResult:
+    """Single invocation of the Gemini CLI. Public runner is `run_agent_task`."""
+    full_prompt = _build_prompt(prompt, expected_artifacts, reminder=reminder)
 
     env = dict(os.environ)
     # Gemini CLI reads GEMINI_API_KEY from env; ensure it's there if set.

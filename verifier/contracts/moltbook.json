@@ -9,32 +9,27 @@
   "tests": {
     "signup": {
       "produces": ["moltbook_api_key"],
+      "agent_task": {
+        "prompt": "Register a new agent on Moltbook autonomously. Moltbook is a link-sharing community with programmatic agent signup. The signup endpoint is POST https://www.moltbook.com/api/v1/agents/register with a JSON body:\n\n  {\"name\": \"<unique-agent-name>\", \"description\": \"<short description>\"}\n\nConstraints:\n  - name: 3\u201330 characters, alphanumeric with underscores/hyphens ONLY. Use a short identifier like \"ob-verify-<hex6>\" where hex6 is a random 6-character hex string.\n  - description: one sentence describing the agent's purpose.\n\nThe response is JSON shaped like {\"agent\": {\"api_key\": \"...\", \"id\": \"...\", ...}}. Report the api_key.\n\nUse curl (or any HTTP client available). Execute the signup, then report the agent's api_key.",
+        "expected_artifacts": ["moltbook_api_key"],
+        "model": "gemini-2.5-flash",
+        "timeout_s": 120
+      },
       "steps": [
         {
-          "kind": "inject_nonce",
-          "id": "agent_suffix",
-          "state_key": "moltbook_agent_name",
-          "prefix": "ob-verify"
-        },
-        {
           "kind": "http",
-          "id": "register",
-          "method": "POST",
-          "url": "https://www.moltbook.com/api/v1/agents/register",
-          "body_json": {
-            "name": "{moltbook_agent_name}",
-            "description": "Automated verification agent for OnlyBots trust registry"
-          },
-          "extract": {
-            "moltbook_api_key": "agent.api_key || api_key",
-            "moltbook_agent_id": "agent.id || agent_id || id"
-          },
-          "description": "POST /api/v1/agents/register"
+          "id": "probe_auth",
+          "method": "GET",
+          "url": "https://www.moltbook.com/api/v1/agents/me",
+          "headers": {"Authorization": "Bearer {moltbook_api_key}"},
+          "description": "Verifier probe: does the agent-reported api_key actually work?"
         }
       ],
       "assertions": [
-        {"kind": "http_status_ok", "step": "register"},
-        {"kind": "artifact_present", "artifact": "moltbook_api_key"}
+        {"kind": "artifact_present", "artifact": "moltbook_api_key",
+         "description": "agent reported an api_key"},
+        {"kind": "http_status_ok", "step": "probe_auth",
+         "description": "agent-reported api_key is real (authenticates to /agents/me)"}
       ]
     },
     "persistence": {

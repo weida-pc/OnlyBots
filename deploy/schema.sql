@@ -10,12 +10,25 @@ CREATE TABLE IF NOT EXISTS services (
   docs_url VARCHAR(500),
   pricing_url VARCHAR(500),
   contact_email VARCHAR(200) NOT NULL,
-  status VARCHAR(20) NOT NULL DEFAULT 'pending',
+  -- 40 chars holds 'pending_domain_verification' (27) and 'awaiting_contract' (17).
+  status VARCHAR(40) NOT NULL DEFAULT 'pending',
   failed_at_step INTEGER,
   verified_date TIMESTAMPTZ,
+  -- Phase 6: domain ownership verification for submissions.
+  -- Submitters must publish the token in a _onlybots-verify TXT record on
+  -- their service's domain. Until domain_verified_at is set, the verifier
+  -- skips the service (prevents spam submissions for domains you don't own).
+  domain_verification_token VARCHAR(64),
+  domain_verified_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Idempotent migrations for existing deployments.
+ALTER TABLE services ADD COLUMN IF NOT EXISTS domain_verification_token VARCHAR(64);
+ALTER TABLE services ADD COLUMN IF NOT EXISTS domain_verified_at TIMESTAMPTZ;
+-- Widen status column to fit 'pending_domain_verification' / 'awaiting_contract'.
+ALTER TABLE services ALTER COLUMN status TYPE VARCHAR(40);
 
 CREATE TABLE IF NOT EXISTS verification_runs (
   id SERIAL PRIMARY KEY,

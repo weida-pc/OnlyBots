@@ -10,9 +10,18 @@ export interface Service {
   docs_url: string | null;
   pricing_url: string | null;
   contact_email: string;
-  status: "pending" | "verified" | "failed";
+  status:
+    | "pending"
+    | "verified"
+    | "failed"
+    | "pending_domain_verification"
+    | "awaiting_contract";
   failed_at_step: number | null;
   verified_date: string | null;
+  // Phase 6: domain ownership verification columns. Nullable for services
+  // created before this migration landed.
+  domain_verification_token: string | null;
+  domain_verified_at: string | null;
   created_at: string;
   updated_at: string;
 }

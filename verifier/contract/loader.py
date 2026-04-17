@@ -40,9 +40,9 @@ _STEP_KIND_ALLOWED_FIELDS: dict[str, set[str]] = {
     "http": {"kind", "id", "method", "url", "headers", "body_json", "body_raw",
              "extract", "browser_fallback", "must_contain_artifact", "description"},
     "put_file": {"kind", "id", "url", "body_template", "content_type", "description"},
-    "inject_nonce": {"kind", "id", "state_key", "prefix"},
-    "env_secret": {"kind", "id", "env_var", "state_key", "required"},
-    "wait": {"kind", "id", "seconds"},
+    "inject_nonce": {"kind", "id", "state_key", "prefix", "description"},
+    "env_secret": {"kind", "id", "env_var", "state_key", "required", "description"},
+    "wait": {"kind", "id", "seconds", "description"},
 }
 
 _ASSERTION_KIND_ALLOWED_FIELDS: dict[str, set[str]] = {
@@ -103,16 +103,19 @@ def _parse_step(raw: dict, ctx: str) -> Any:
         return InjectNonceStep(
             kind="inject_nonce", id=raw["id"], state_key=raw["state_key"],
             prefix=raw.get("prefix", "onlybots-verify"),
+            description=raw.get("description", ""),
         )
     if kind == "env_secret":
         _require_keys(raw, ["env_var", "state_key"], ctx)
         return EnvSecretStep(
             kind="env_secret", id=raw["id"], env_var=raw["env_var"],
             state_key=raw["state_key"], required=bool(raw.get("required", True)),
+            description=raw.get("description", ""),
         )
     if kind == "wait":
         _require_keys(raw, ["seconds"], ctx)
-        return WaitStep(kind="wait", id=raw["id"], seconds=float(raw["seconds"]))
+        return WaitStep(kind="wait", id=raw["id"], seconds=float(raw["seconds"]),
+                         description=raw.get("description", ""))
     raise ContractError(f"{ctx}: unreachable kind '{kind}'")
 
 

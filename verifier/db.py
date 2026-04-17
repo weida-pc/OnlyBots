@@ -9,14 +9,20 @@ def get_conn():
 
 
 def fetch_pending_runs():
-    """Return verification runs with status='running' joined with service info."""
+    """Return verification runs with status='running' joined with service info.
+
+    Includes `status_before_this_run` (alias for services.status) so the
+    runner can detect drift — a service that was 'verified' before this run
+    and fails now is a regression, not a first-time failure.
+    """
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT vr.*, s.slug, s.name, s.url, s.signup_url,
                        s.category, s.description, s.core_workflow,
-                       s.docs_url, s.pricing_url
+                       s.docs_url, s.pricing_url,
+                       s.status AS status_before_this_run
                 FROM verification_runs vr
                 JOIN services s ON s.id = vr.service_id
                 WHERE vr.status = 'running'
@@ -81,6 +87,82 @@ def update_service_status(service_id: int, status: str,
                 WHERE id = %s
             """, (status, failed_at_step, verified_date, service_id))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def queue_drift_check(staleness_hours: int = 24,
+                       verifier_version: str = "0.4.0-drift") -> int:
+    """Queue re-runs for verified services whose last verification is older
+    than `staleness_hours`. Returns the number of runs queued.
+
+    This is the Phase 4 drift detection mechanism. It doesn't mark anything as
+    drifted — it simply re-runs the verification. If a service that was
+    passing starts failing, the existing verify_service logic flips its
+    status to 'failed' and the normal alerting (if any) triggers. Drift
+    detection is the act of *running the check periodically*, not a new
+    pass/fail state.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT s.id, s.slug
+                FROM services s
+                WHERE s.status = 'verified'
+                  AND (s.updated_at IS NULL
+                       OR s.updated_at < NOW() - INTERVAL '%s hours')
+                  -- Don't queue if there's already a pending/running run
+                  AND NOT EXISTS (
+                      SELECT 1 FROM verification_runs r
+                      WHERE r.service_id = s.id
+                        AND r.status IN ('running', 'queued')
+                  )
+            """, (staleness_hours,))
+            stale = cur.fetchall()
+
+            count = 0
+            for row in stale:
+                cur.execute("""
+                    INSERT INTO verification_runs
+                        (service_id, status, started_at, verifier_version)
+                    VALUES (%s, 'running', NOW(), %s)
+                """, (row["id"], verifier_version))
+                count += 1
+        conn.commit()
+        return count
+    finally:
+        conn.close()
+
+
+def find_drifted_services() -> list[dict]:
+    """Return services that appear to have drifted: their latest run is
+    failing, but an earlier run was passing. Useful for a dashboard or a
+    one-shot cron-driven alert.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                WITH latest AS (
+                    SELECT DISTINCT ON (service_id) service_id, status, completed_at
+                    FROM verification_runs
+                    WHERE status IN ('passed', 'failed')
+                    ORDER BY service_id, started_at DESC
+                ),
+                ever_passed AS (
+                    SELECT DISTINCT service_id
+                    FROM verification_runs
+                    WHERE status = 'passed'
+                )
+                SELECT s.id, s.slug, s.name, l.completed_at AS latest_failed_at
+                FROM services s
+                JOIN latest l ON l.service_id = s.id
+                JOIN ever_passed ep ON ep.service_id = s.id
+                WHERE l.status = 'failed'
+                ORDER BY l.completed_at DESC
+            """)
+            return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
 

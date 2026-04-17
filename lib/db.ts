@@ -131,6 +131,7 @@ export async function createService(data: {
   docs_url?: string;
   pricing_url?: string;
   contact_email: string;
+  domain_verification_token: string;
 }): Promise<Service> {
   const p = getPool();
   if (!p) throw new Error("DATABASE_URL is not configured");
@@ -149,11 +150,16 @@ export async function createService(data: {
     slug = `${baseSlug}-${attempt}`;
   }
 
+  // New submissions land in pending_domain_verification. The verifier
+  // skips this status; only after the domain TXT record is confirmed does
+  // the service flip to 'pending' and become eligible for verification.
   const result = await p.query(
     `INSERT INTO services
        (slug, name, url, signup_url, category, description, core_workflow,
-        docs_url, pricing_url, contact_email, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending')
+        docs_url, pricing_url, contact_email, status,
+        domain_verification_token)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+             'pending_domain_verification', $11)
      RETURNING *`,
     [
       slug,
@@ -166,10 +172,33 @@ export async function createService(data: {
       data.docs_url ?? null,
       data.pricing_url ?? null,
       data.contact_email,
+      data.domain_verification_token,
     ]
   );
 
   return result.rows[0] as Service;
+}
+
+
+/**
+ * Mark a service's domain as verified: timestamp it and flip status to
+ * 'pending' so the verifier picks it up. Returns the updated row, or null
+ * if the slug doesn't exist.
+ */
+export async function markDomainVerified(slug: string): Promise<Service | null> {
+  const p = getPool();
+  if (!p) throw new Error("DATABASE_URL is not configured");
+  const result = await p.query(
+    `UPDATE services
+       SET domain_verified_at = NOW(),
+           status = 'pending',
+           updated_at = NOW()
+     WHERE slug = $1
+       AND domain_verified_at IS NULL
+     RETURNING *`,
+    [slug]
+  );
+  return (result.rows[0] ?? null) as Service | null;
 }
 
 export async function createVerificationRun(
