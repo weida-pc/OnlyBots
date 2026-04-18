@@ -1,0 +1,17 @@
+[Unit]
+Description=Run OnlyBots drift check every 6 hours
+# Don't fire if the main verifier isn't up.
+Requires=onlybots-verifier.service
+
+[Timer]
+# OnCalendar uses systemd calendar syntax: at 00:00, 06:00, 12:00, 18:00 UTC.
+OnCalendar=*-*-* 00/6:00:00
+# If the system was down when the timer would have fired, run it as soon as
+# the system is back. Prevents gaps longer than 6h + boot delay.
+Persistent=true
+# Stagger across instances so multiple deployments don't hammer target
+# services simultaneously.
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target
