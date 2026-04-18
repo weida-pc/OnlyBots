@@ -136,19 +136,52 @@ def run_agent_task(
     """
     attempt = 0
     last: AgentRunResult | None = None
+    t_overall = time.time()
     while True:
-        result = _run_once(prompt, expected_artifacts, model, timeout_s, cwd,
-                            reminder=(attempt > 0))
+        # Budget: don't let retries push us past 1.5x the per-attempt timeout.
+        # Prevents a late-failing first attempt from leaving seconds for the
+        # retry, which would almost certainly fail too.
+        remaining_budget = (timeout_s * 1.5) - (time.time() - t_overall)
+        attempt_timeout = int(min(timeout_s, max(30, remaining_budget)))
+
+        # Structured log — grep-friendly. Each line is independently parseable
+        # so ops can measure real flake rates over time.
+        print(
+            f"[agent.runtime] attempt={attempt + 1}/{max_retries + 1} "
+            f"model={model} timeout={attempt_timeout}s "
+            f"reminder={attempt > 0}"
+        )
+
+        result = _run_once(prompt, expected_artifacts, model, attempt_timeout,
+                            cwd, reminder=(attempt > 0))
         attempt_info = {
             "attempt": attempt + 1,
             "status": result.status,
             "elapsed_s": result.elapsed_s,
         }
         result.attempts = [*(last.attempts if last else []), attempt_info]
+
+        print(
+            f"[agent.runtime] attempt={attempt + 1} "
+            f"status={result.status} elapsed={result.elapsed_s}s "
+            f"missing_keys={result.missing_keys}"
+        )
+
         if result.status == "ok":
+            if attempt > 0:
+                print(f"[agent.runtime] recovered after {attempt} retry(s)")
             return result
-        # Retry only on soft failures (agent produced output but wrong shape)
+
+        # Retry only on soft failures (agent produced output but wrong shape).
+        # Hard failures (timeout, cli_missing, error) won't benefit from retry.
         if result.status in ("malformed", "missing_keys") and attempt < max_retries:
+            # Stop if we've already consumed most of the total budget.
+            if (time.time() - t_overall) >= timeout_s * 1.3:
+                print(
+                    f"[agent.runtime] giving up — retry would exceed "
+                    f"time budget ({time.time() - t_overall:.0f}s elapsed)"
+                )
+                return result
             attempt += 1
             last = result
             continue
