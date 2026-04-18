@@ -1,42 +1,37 @@
 {
   "schema_version": 1,
   "service_slug": "browser-use",
-  "notes": "Uses pre-provisioned BROWSER_USE_API_KEY (no programmatic signup — requires domain email). Uses non-standard X-Browser-Use-API-Key header instead of Authorization Bearer. Workflow creates a browser automation task.",
+  "notes": "Browser Use has no programmatic signup (requires domain email). The verifier uses a pre-provisioned BROWSER_USE_API_KEY from env and the non-standard X-Browser-Use-API-Key auth header. Intentionally NOT migrated to agent-driven signup for the same reason as signbee: the agent would add LLM cost + latency to a one-call auth probe with zero autonomy signal. Direct-HTTP is the honest representation.",
   "allowed_env": ["BROWSER_USE_API_KEY"],
   "sandbox": {
     "url_allowlist": ["api.browser-use.com"]
   },
   "tests": {
     "signup": {
-      "produces": ["browseruse_api_key", "browseruse_session_count"],
-      "agent_task": {
-        "prompt": "Exercise the Browser Use API autonomously. Browser Use is a browser-automation-as-a-service platform. There is no programmatic signup (requires domain email), so the verifier pre-provisions an API key:\n\n    BROWSER_USE_API_KEY = {browseruse_api_key}\n\nIMPORTANT: Browser Use uses a non-standard auth header. You must send:\n\n    X-Browser-Use-API-Key: <api_key>\n\nNOT Authorization: Bearer.\n\nCall GET https://api.browser-use.com/api/v3/sessions to confirm the credential works. The response is a JSON object with a \"total\" field. Capture that field's value and report it along with the API key.",
-        "expected_artifacts": ["browseruse_session_count"],
-        "model": "gemini-2.5-flash",
-        "timeout_s": 120
-      },
+      "produces": ["browseruse_api_key"],
       "steps": [
         {
           "kind": "env_secret",
           "id": "load_key",
           "env_var": "BROWSER_USE_API_KEY",
           "state_key": "browseruse_api_key",
-          "required": true,
-          "description": "Load BROWSER_USE_API_KEY so the agent prompt can reference it"
+          "required": true
         },
         {
           "kind": "http",
-          "id": "probe_auth",
+          "id": "list_sessions",
           "method": "GET",
           "url": "https://api.browser-use.com/api/v3/sessions",
           "headers": {"X-Browser-Use-API-Key": "{browseruse_api_key}"},
-          "description": "Verifier probe: does the key the agent used actually work?"
+          "extract": {
+            "browseruse_session_count": "total"
+          },
+          "description": "GET /api/v3/sessions (auth probe)"
         }
       ],
       "assertions": [
-        {"kind": "artifact_present", "artifact": "browseruse_api_key"},
-        {"kind": "http_status_ok", "step": "probe_auth",
-         "description": "credential agent claimed to use actually authenticates"}
+        {"kind": "http_status_ok", "step": "list_sessions",
+         "description": "credential accepted at signup"}
       ]
     },
     "persistence": {
