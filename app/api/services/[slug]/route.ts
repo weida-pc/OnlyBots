@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServiceBySlug } from "@/lib/db";
+import { getServiceBySlug, redactServiceSecrets } from "@/lib/db";
 
 interface RouteParams {
   params: Promise<{ slug: string }>;
 }
 
-export async function GET(request: NextRequest, { params }: RouteParams) {
+export async function GET(_request: NextRequest, { params }: RouteParams) {
   const { slug } = await params;
 
   const service = await getServiceBySlug(slug);
@@ -14,5 +14,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "Service not found" }, { status: 404 });
   }
 
-  return NextResponse.json(service);
+  // Strip the domain_verification_token before returning. It's a one-time
+  // secret echoed only at submit time.
+  return NextResponse.json(redactServiceSecrets(service));
 }

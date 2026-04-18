@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServices } from "@/lib/db";
+import { getServices, redactServiceSecrets } from "@/lib/db";
 
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
@@ -12,7 +12,9 @@ export async function GET(request: NextRequest) {
 
   const services = await getServices(filters);
 
-  return NextResponse.json(services, {
+  // Redact per-row: a bulk listing would otherwise leak every pending
+  // service's token.
+  return NextResponse.json(services.map(redactServiceSecrets), {
     headers: {
       Link: '</api/schema>; rel="describedby"',
     },

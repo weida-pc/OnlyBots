@@ -181,24 +181,70 @@ export async function createService(data: {
 
 
 /**
- * Mark a service's domain as verified: timestamp it and flip status to
- * 'pending' so the verifier picks it up. Returns the updated row, or null
- * if the slug doesn't exist.
+ * Mark a service's domain as verified AND queue its first verification run
+ * in a single transaction. Returns the updated row, or null if the slug
+ * doesn't exist or was already verified (preventing duplicate runs under
+ * concurrent POSTs to /verify-domain).
+ *
+ * The `domain_verified_at IS NULL` predicate makes the UPDATE idempotent:
+ * only the first request wins. Wrapping the INSERT in the same transaction
+ * prevents the "marked verified but no run queued" state if the second
+ * statement fails.
  */
-export async function markDomainVerified(slug: string): Promise<Service | null> {
+export async function markDomainVerifiedAndQueueRun(
+  slug: string
+): Promise<Service | null> {
   const p = getPool();
   if (!p) throw new Error("DATABASE_URL is not configured");
-  const result = await p.query(
-    `UPDATE services
-       SET domain_verified_at = NOW(),
-           status = 'pending',
-           updated_at = NOW()
-     WHERE slug = $1
-       AND domain_verified_at IS NULL
-     RETURNING *`,
-    [slug]
-  );
-  return (result.rows[0] ?? null) as Service | null;
+  const client = await p.connect();
+  try {
+    await client.query("BEGIN");
+    const updated = await client.query(
+      `UPDATE services
+         SET domain_verified_at = NOW(),
+             status = 'pending',
+             updated_at = NOW()
+       WHERE slug = $1
+         AND domain_verified_at IS NULL
+       RETURNING *`,
+      [slug]
+    );
+    if (updated.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    const service = updated.rows[0] as Service;
+    await client.query(
+      `INSERT INTO verification_runs (service_id, status, started_at, verifier_version)
+       VALUES ($1, 'running', NOW(), $2)`,
+      [service.id, "0.4.0-domain-verified"]
+    );
+    await client.query("COMMIT");
+    return service;
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+
+/**
+ * Strip the domain_verification_token from a service row before returning it
+ * in an API response. The token is a one-time secret — exposing it in
+ * subsequent verify-domain polls would let anyone who guesses the slug
+ * retrieve it and publish the TXT record themselves. Callers should use
+ * this helper on any service row shown post-submission.
+ */
+export function redactServiceSecrets<T extends { domain_verification_token?: string | null }>(
+  service: T
+): Omit<T, "domain_verification_token"> {
+  // Destructure out the secret; keep everything else.
+  // (ESLint will complain about the unused destructured var; that's intentional.)
+
+  const { domain_verification_token: _token, ...rest } = service;
+  return rest;
 }
 
 export async function createVerificationRun(
