@@ -135,13 +135,25 @@ def _run_http(step: HttpStep, state: dict) -> dict:
     resp: dict
 
     if step.method == "GET":
-        if step.browser_fallback:
-            needle = ""
-            if step.must_contain_artifact:
-                needle = str(state.get(step.must_contain_artifact, "") or "")
-            resp = _legacy.http_get_resilient(url, must_contain=needle)
+        # All GETs go through the resilient path (plain http.client first,
+        # escalate to curl_cffi browser fingerprint on 5xx/blocked). This
+        # costs nothing on the happy path and auto-handles Cloudflare-gated
+        # services. `browser_fallback` with `must_contain_artifact` adds
+        # content-check semantics on top of the same resilient escalation.
+        needle = ""
+        if step.browser_fallback and step.must_contain_artifact:
+            needle = str(state.get(step.must_contain_artifact, "") or "")
+        # http_get_resilient ignores headers arg today; headers-dependent auth
+        # calls are rare on content-fetch GETs. If this bites, extend the
+        # resilient helper to pass headers through.
+        if headers:
+            # When headers are set (e.g. Bearer auth), use plain http_get —
+            # the resilient escalation path doesn't propagate arbitrary
+            # headers to curl_cffi, and auth-gated endpoints typically
+            # don't sit behind Cloudflare bot-detection anyway.
+            resp = _legacy.http_get(url, headers=headers)
         else:
-            resp = _legacy.http_get(url, headers=headers or None)
+            resp = _legacy.http_get_resilient(url, must_contain=needle)
     elif step.method == "POST":
         if step.body_raw is not None:
             body_str = _render_string(step.body_raw, state)

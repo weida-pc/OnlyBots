@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "service_slug": "coinos",
+  "notes": "Anonymous Bitcoin Lightning wallet. Truly autonomous signup — POST /api/register with {user: {username, password}} returns a JWT token immediately, no email, no phone, no KYC. Username must be alphanumeric only (no hyphens). Hand-corrected from LLM draft: generator guessed /register with flat body; real API is /api/register with nested user shape. Generator had no docs_url to ground on. This illustrates the review-gate's load-bearing role when docs aren't machine-readable.",
+  "allowed_env": [],
+  "sandbox": {
+    "url_allowlist": ["coinos.io"]
+  },
+  "tests": {
+    "signup": {
+      "produces": ["coinos_username", "coinos_token"],
+      "agent_task": {
+        "prompt": "Register a new Coinos account autonomously. Coinos is an anonymous Bitcoin Lightning wallet. The signup endpoint is:\n\n  POST https://coinos.io/api/register\n  Content-Type: application/json\n  Body: {\"user\": {\"username\": \"<name>\", \"password\": \"<pw>\"}}\n\nConstraints:\n  - username: 6-20 characters, ALPHANUMERIC ONLY (no hyphens, no underscores, no dots). Use a unique name like 'onlybots' followed by random alphanumerics.\n  - password: any reasonable password you generate\n\nThe response is JSON containing: id, username, token (a JWT), pubkey, nsec, npub. Execute the signup via curl, then report the username and the token.",
+        "expected_artifacts": ["coinos_username", "coinos_token"],
+        "model": "gemini-2.5-flash",
+        "timeout_s": 120
+      },
+      "steps": [
+        {
+          "kind": "http",
+          "id": "probe_token",
+          "method": "GET",
+          "url": "https://coinos.io/api/me",
+          "headers": {"Authorization": "Bearer {coinos_token}"},
+          "description": "Verifier probe: does the agent-reported token actually authenticate?"
+        }
+      ],
+      "assertions": [
+        {"kind": "artifact_present", "artifact": "coinos_username",
+         "description": "agent reported a username"},
+        {"kind": "artifact_present", "artifact": "coinos_token",
+         "description": "agent reported a JWT token"},
+        {"kind": "http_status_ok", "step": "probe_token",
+         "description": "token authenticates against /api/me (proves it's real, not hallucinated)"}
+      ]
+    },
+    "persistence": {
+      "requires": ["coinos_token"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "me_again",
+          "method": "GET",
+          "url": "https://coinos.io/api/me",
+          "headers": {"Authorization": "Bearer {coinos_token}"},
+          "description": "Re-authenticate with the stored token after time gap"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "me_again",
+         "description": "token still valid — persistence proven"}
+      ]
+    },
+    "workflow": {
+      "requires": ["coinos_token"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "list_payments",
+          "method": "GET",
+          "url": "https://coinos.io/api/payments",
+          "headers": {"Authorization": "Bearer {coinos_token}"},
+          "description": "List payments — exercises an authed wallet-operation endpoint"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "list_payments",
+         "description": "token can be used for wallet operations"}
+      ]
+    }
+  }
+}
