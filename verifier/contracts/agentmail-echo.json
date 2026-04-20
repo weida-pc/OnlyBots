@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "service_slug": "agentmail-echo",
+  "notes": "Self-test contract for receive_email primitive. Exercises send-and-receive loop to verifier's own inbox (onlybots@agentmail.co). The verifier sends a nonce-tagged email to itself, then polls receive_email until the message arrives. Proves the inbox is live, the API key works, and receive_email correctly filters + extracts from arrived mail.",
+  "allowed_env": ["AGENTMAIL_API_KEY", "AGENTMAIL_INBOX_ID"],
+  "sandbox": {
+    "url_allowlist": ["api.agentmail.to"]
+  },
+  "tests": {
+    "signup": {
+      "produces": ["agentmail_api_key", "agentmail_inbox_id", "echo_nonce"],
+      "steps": [
+        {
+          "kind": "env_secret",
+          "id": "load_api_key",
+          "env_var": "AGENTMAIL_API_KEY",
+          "state_key": "agentmail_api_key",
+          "description": "Load verifier AgentMail API key"
+        },
+        {
+          "kind": "env_secret",
+          "id": "load_inbox_id",
+          "env_var": "AGENTMAIL_INBOX_ID",
+          "state_key": "agentmail_inbox_id",
+          "description": "Load verifier inbox ID (UUID for onlybots@agentmail.co)"
+        },
+        {
+          "kind": "inject_nonce",
+          "id": "mint_nonce",
+          "state_key": "echo_nonce",
+          "prefix": "echo-verify",
+          "description": "Mint a unique nonce to embed in the echo email"
+        },
+        {
+          "kind": "http",
+          "id": "send_echo_email",
+          "method": "POST",
+          "url": "https://api.agentmail.to/v0/inboxes/{agentmail_inbox_id}/messages/send",
+          "headers": {"Authorization": "Bearer {agentmail_api_key}"},
+          "body_json": {
+            "to": ["onlybots@agentmail.co"],
+            "subject": "OnlyBots echo self-test",
+            "text": "nonce={echo_nonce}"
+          },
+          "description": "Send echo email from verifier inbox to itself with nonce in body"
+        },
+        {
+          "kind": "receive_email",
+          "id": "receive_echo",
+          "inbox": "onlybots@agentmail.co",
+          "match": {
+            "subject_regex": "OnlyBots echo self-test",
+            "body_contains": "{echo_nonce}"
+          },
+          "extract": {
+            "received_nonce": "regex:nonce=([a-z0-9-]+)"
+          },
+          "interval_s": 5.0,
+          "max_attempts": 12,
+          "description": "Wait for the echo email to arrive and extract the nonce from body"
+        }
+      ],
+      "assertions": [
+        {
+          "kind": "artifact_present",
+          "artifact": "agentmail_api_key",
+          "description": "AGENTMAIL_API_KEY env var is set"
+        },
+        {
+          "kind": "artifact_present",
+          "artifact": "agentmail_inbox_id",
+          "description": "AGENTMAIL_INBOX_ID env var is set"
+        },
+        {
+          "kind": "http_status_ok",
+          "step": "send_echo_email",
+          "description": "Email send accepted by AgentMail API"
+        },
+        {
+          "kind": "http_status_ok",
+          "step": "receive_echo",
+          "description": "Echo email arrived in inbox within polling window"
+        },
+        {
+          "kind": "artifact_present",
+          "artifact": "received_nonce",
+          "description": "Nonce was extracted from arrived email body — proves round-trip"
+        }
+      ]
+    },
+    "persistence": {
+      "requires": ["agentmail_api_key"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "list_inboxes",
+          "method": "GET",
+          "url": "https://api.agentmail.to/v0/inboxes",
+          "headers": {"Authorization": "Bearer {agentmail_api_key}"},
+          "description": "Verify API key still authenticates"
+        }
+      ],
+      "assertions": [
+        {
+          "kind": "http_status_ok",
+          "step": "list_inboxes",
+          "description": "API key is still valid (inbox list returns 200)"
+        }
+      ]
+    },
+    "workflow": {
+      "requires": ["agentmail_api_key", "agentmail_inbox_id"],
+      "produces": ["workflow_nonce", "workflow_received_nonce"],
+      "steps": [
+        {
+          "kind": "inject_nonce",
+          "id": "mint_workflow_nonce",
+          "state_key": "workflow_nonce",
+          "prefix": "workflow-verify",
+          "description": "Fresh nonce for workflow send-receive cycle"
+        },
+        {
+          "kind": "http",
+          "id": "send_workflow_email",
+          "method": "POST",
+          "url": "https://api.agentmail.to/v0/inboxes/{agentmail_inbox_id}/messages/send",
+          "headers": {"Authorization": "Bearer {agentmail_api_key}"},
+          "body_json": {
+            "to": ["onlybots@agentmail.co"],
+            "subject": "OnlyBots workflow self-test",
+            "text": "workflow-nonce={workflow_nonce}"
+          },
+          "description": "Send workflow echo email with unique nonce"
+        },
+        {
+          "kind": "receive_email",
+          "id": "receive_workflow_email",
+          "inbox": "onlybots@agentmail.co",
+          "match": {
+            "subject_regex": "OnlyBots workflow self-test",
+            "body_contains": "{workflow_nonce}"
+          },
+          "extract": {
+            "workflow_received_nonce": "regex:workflow-nonce=([a-z0-9-]+)"
+          },
+          "interval_s": 5.0,
+          "max_attempts": 12,
+          "description": "Poll inbox until workflow email arrives; extract nonce to confirm content"
+        }
+      ],
+      "assertions": [
+        {
+          "kind": "http_status_ok",
+          "step": "send_workflow_email",
+          "description": "Workflow email sent successfully"
+        },
+        {
+          "kind": "http_status_ok",
+          "step": "receive_workflow_email",
+          "description": "Workflow email arrived within polling window"
+        },
+        {
+          "kind": "artifact_present",
+          "artifact": "workflow_received_nonce",
+          "description": "Nonce extracted from workflow email body — full send+receive loop works"
+        }
+      ]
+    }
+  }
+}

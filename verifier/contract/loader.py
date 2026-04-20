@@ -20,6 +20,7 @@ from typing import Any
 from .schema import (
     Contract, TestSpec, Sandbox, AgentTask,
     HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep, PollUntilStep,
+    ReceiveEmailStep,
     HttpStatusOk, ArtifactPresent, ContentServesNonce,
 )
 
@@ -45,6 +46,8 @@ _STEP_KIND_ALLOWED_FIELDS: dict[str, set[str]] = {
     "wait": {"kind", "id", "seconds", "description"},
     "poll_until": {"kind", "id", "url", "condition", "method", "headers",
                    "body_json", "extract", "interval_s", "max_attempts", "description"},
+    "receive_email": {"kind", "id", "inbox", "match", "extract",
+                      "interval_s", "max_attempts", "description"},
 }
 
 _ASSERTION_KIND_ALLOWED_FIELDS: dict[str, set[str]] = {
@@ -132,6 +135,29 @@ def _parse_step(raw: dict, ctx: str) -> Any:
             extract=raw.get("extract", {}) or {},
             interval_s=float(raw.get("interval_s", 5.0)),
             max_attempts=int(raw.get("max_attempts", 12)),
+            description=raw.get("description", ""),
+        )
+    if kind == "receive_email":
+        _require_keys(raw, ["inbox"], ctx)
+        match = raw.get("match", {}) or {}
+        if not isinstance(match, dict):
+            raise ContractError(f"{ctx}: receive_email.match must be a dict")
+        _allowed_match_keys = {"from_contains", "subject_regex", "body_contains"}
+        unknown_match = set(match.keys()) - _allowed_match_keys
+        if unknown_match:
+            raise ContractError(
+                f"{ctx}: receive_email.match has unknown key(s) {sorted(unknown_match)}; "
+                f"allowed: {sorted(_allowed_match_keys)}")
+        extract = raw.get("extract", {}) or {}
+        if not isinstance(extract, dict):
+            raise ContractError(f"{ctx}: receive_email.extract must be a dict")
+        return ReceiveEmailStep(
+            kind="receive_email", id=raw["id"],
+            inbox=raw["inbox"],
+            match=match,
+            extract=extract,
+            interval_s=float(raw.get("interval_s", 3.0)),
+            max_attempts=int(raw.get("max_attempts", 20)),
             description=raw.get("description", ""),
         )
     raise ContractError(f"{ctx}: unreachable kind '{kind}'")

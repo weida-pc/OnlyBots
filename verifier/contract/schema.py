@@ -11,12 +11,14 @@ between tests explicit, loader-checkable, and no longer punned through
 convention.
 
 The vocabulary is deliberately tiny (v1 post-critique):
-  Step kinds (5):
+  Step kinds (7):
     - http          : one HTTP request; optional extraction into state
     - put_file      : raw-bytes PUT (for presigned URLs)
     - inject_nonce  : mint a unique nonce; store under state[key]
     - env_secret    : load env var into state (gated by contract.allowed_env)
     - wait          : sleep N seconds (for async API propagation)
+    - poll_until    : poll a URL until a JMESPath condition is truthy
+    - receive_email : poll an AgentMail inbox until a matching message arrives
 
   Assertion kinds (3):
     - http_status_ok       : named step's response status is 2xx
@@ -37,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-StepKind = Literal["http", "put_file", "inject_nonce", "env_secret", "wait", "poll_until"]
+StepKind = Literal["http", "put_file", "inject_nonce", "env_secret", "wait", "poll_until", "receive_email"]
 
 
 @dataclass
@@ -122,7 +124,32 @@ class PollUntilStep:
     description: str = ""
 
 
-Step = HttpStep | PutFileStep | InjectNonceStep | EnvSecretStep | WaitStep | PollUntilStep
+@dataclass
+class ReceiveEmailStep:
+    """Poll an AgentMail inbox until a matching message arrives.
+
+    match keys (all optional, ANDed):
+      from_contains  — substring check on the From address/display name
+      subject_regex  — Python regex applied to the Subject header
+      body_contains  — substring check on the plain-text body
+
+    extract map: state_key -> "regex:PATTERN" (first capture group from body)
+                           or JMESPath expression (applied to the message JSON).
+
+    Uses server-side ?after= filtering so only messages after step entry are
+    considered. Falls back to client-side timestamp comparison as a guard.
+    """
+    kind: Literal["receive_email"]
+    id: str
+    inbox: str                      # templated — email address of the inbox to poll
+    match: dict[str, str] = field(default_factory=dict)  # {from_contains?, subject_regex?, body_contains?}
+    extract: dict[str, str] = field(default_factory=dict)  # {state_key: "regex:PATTERN" or JMESPath}
+    interval_s: float = 3.0
+    max_attempts: int = 20
+    description: str = ""
+
+
+Step = HttpStep | PutFileStep | InjectNonceStep | EnvSecretStep | WaitStep | PollUntilStep | ReceiveEmailStep
 
 
 # ── Assertion kinds ───────────────────────────────────────────────────────────

@@ -34,6 +34,7 @@ import executor as _legacy
 from .schema import (
     Contract, TestSpec, AgentTask,
     HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep, PollUntilStep,
+    ReceiveEmailStep,
     HttpStatusOk, ArtifactPresent, ContentServesNonce,
 )
 
@@ -334,6 +335,183 @@ def _run_poll_until(step: PollUntilStep, state: dict) -> dict:
     }
 
 
+_RECEIVE_EMAIL_MATCH_KEYS = {"from_contains", "subject_regex", "body_contains"}
+_AGENTMAIL_API_BASE = "https://api.agentmail.to/v0"
+
+
+def _run_receive_email(step: ReceiveEmailStep, state: dict) -> dict:
+    """Poll an AgentMail inbox until a matching message arrives or attempts exhausted.
+
+    Strategy:
+      1. Record watermark t0 as an ISO timestamp.
+      2. Use server-side ?after=<ISO> to filter messages by arrival time.
+      3. For each candidate, optionally fetch the full message (GET /messages/{id})
+         only when body_contains or body-extracting regex is needed.
+      4. First message passing all match filters wins; extract into state, return.
+      5. After max_attempts: return failure record.
+
+    The returned body is a short summary (from + subject + any extracts only) —
+    the full email body is never written to the step record.
+    """
+    import datetime
+
+    inbox = _render_string(step.inbox, state)
+    rendered_match = {k: _render_string(v, state) for k, v in step.match.items()}
+
+    api_key = os.environ.get("AGENTMAIL_API_KEY", "")
+    if not api_key:
+        return {
+            "step": f"{step.id}: {step.description or f'receive_email {inbox}'}",
+            "step_id": step.id,
+            "status": 0, "body": "", "elapsed_ms": 0,
+            "error": "AGENTMAIL_API_KEY not set in environment",
+            "attempts": 0, "extracted": {},
+        }
+
+    auth_headers = {"Authorization": f"Bearer {api_key}"}
+
+    # Record watermark — ISO 8601 with Z suffix (UTC), truncated to seconds.
+    t0_dt = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+    t0_iso = t0_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    t0_monotonic = time.monotonic()
+
+    needs_body = ("body_contains" in rendered_match or
+                  any(v.startswith("regex:") for v in step.extract.values()))
+
+    list_url = f"{_AGENTMAIL_API_BASE}/inboxes/{inbox}/messages"
+
+    last_list_status = 0
+    attempts = 0
+
+    for attempt in range(1, step.max_attempts + 1):
+        attempts = attempt
+        elapsed_ms = int((time.monotonic() - t0_monotonic) * 1000)
+
+        # Server-side ?after= filter — only messages after watermark.
+        full_list_url = f"{list_url}?after={t0_iso}&ascending=true"
+        resp = _legacy.http_get(full_list_url, headers=auth_headers)
+        last_list_status = resp.get("status", 0)
+
+        if last_list_status == 0 or last_list_status >= 500:
+            # Transient error — retry
+            if attempt < step.max_attempts:
+                time.sleep(step.interval_s)
+            continue
+
+        if 400 <= last_list_status < 500:
+            return {
+                "step": f"{step.id}: {step.description or f'receive_email {inbox}'}",
+                "step_id": step.id,
+                "status": last_list_status,
+                "body": resp.get("body", "")[:200],
+                "elapsed_ms": elapsed_ms,
+                "error": f"AgentMail list-messages returned HTTP {last_list_status}",
+                "attempts": attempts, "extracted": {},
+            }
+
+        try:
+            list_data = json.loads(resp.get("body", "") or "[]")
+        except Exception:
+            list_data = []
+
+        # API may return a list directly or wrap it: {"messages": [...]}
+        if isinstance(list_data, dict):
+            messages = list_data.get("messages", [])
+        elif isinstance(list_data, list):
+            messages = list_data
+        else:
+            messages = []
+
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+
+            # Client-side timestamp guard (belt-and-suspenders against ?after= gaps).
+            msg_ts_str = msg.get("timestamp") or msg.get("created_at") or ""
+            if msg_ts_str:
+                try:
+                    msg_ts = datetime.datetime.fromisoformat(
+                        msg_ts_str.replace("Z", "+00:00"))
+                    if msg_ts < t0_dt:
+                        continue
+                except ValueError:
+                    pass  # Unparseable timestamp — let it through, server filtered
+
+            msg_from = msg.get("from", "") or ""
+            msg_subject = msg.get("subject", "") or ""
+            msg_preview = msg.get("preview", "") or ""
+            msg_id = msg.get("message_id") or msg.get("id") or ""
+
+            # Apply from_contains / subject_regex without fetching body.
+            if "from_contains" in rendered_match:
+                if rendered_match["from_contains"] not in msg_from:
+                    continue
+            if "subject_regex" in rendered_match:
+                if not re.search(rendered_match["subject_regex"], msg_subject):
+                    continue
+
+            # Fetch full message if body is needed.
+            msg_body_text = ""
+            full_msg = msg  # default: use list-item fields
+            if needs_body and msg_id:
+                get_url = f"{_AGENTMAIL_API_BASE}/inboxes/{inbox}/messages/{msg_id}"
+                get_resp = _legacy.http_get(get_url, headers=auth_headers)
+                if get_resp.get("status", 0) == 200:
+                    try:
+                        full_msg = json.loads(get_resp.get("body", "") or "{}")
+                    except Exception:
+                        full_msg = msg
+                    msg_body_text = full_msg.get("text", "") or ""
+
+            if "body_contains" in rendered_match:
+                if rendered_match["body_contains"] not in msg_body_text:
+                    continue
+
+            # All filters passed — this message matches.
+            extracted = {}
+            for state_key, expr in step.extract.items():
+                if expr.startswith("regex:"):
+                    pattern = expr[len("regex:"):]
+                    m = re.search(pattern, msg_body_text)
+                    val = m.group(1) if (m and m.lastindex and m.lastindex >= 1) else None
+                else:
+                    val = _extract_value(full_msg, expr)
+                if val is not None:
+                    state[state_key] = val
+                    extracted[state_key] = val
+
+            summary = f"from={msg_from!r} subject={msg_subject!r}"
+            if extracted:
+                summary += f" extracted={list(extracted.keys())}"
+
+            return {
+                "step": f"{step.id}: {step.description or f'receive_email {inbox}'}",
+                "step_id": step.id,
+                "status": 200,
+                "body": summary,
+                "elapsed_ms": int((time.monotonic() - t0_monotonic) * 1000),
+                "error": None,
+                "attempts": attempts,
+                "extracted": extracted,
+            }
+
+        # No matching message yet — sleep and retry.
+        if attempt < step.max_attempts:
+            time.sleep(step.interval_s)
+
+    elapsed_ms = int((time.monotonic() - t0_monotonic) * 1000)
+    return {
+        "step": f"{step.id}: {step.description or f'receive_email {inbox}'}",
+        "step_id": step.id,
+        "status": 0,
+        "body": "",
+        "elapsed_ms": elapsed_ms,
+        "error": f"no matching email received after {step.max_attempts} attempts",
+        "attempts": attempts,
+        "extracted": {},
+    }
+
+
 # ── URL allowlist enforcement (speed bump, NOT a sandbox) ─────────────────────
 
 def _host_matches(host: str, pattern: str) -> bool:
@@ -488,10 +666,20 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
 
     def _execute_one(step: Any) -> None:
         # Sandbox URL check happens after template rendering for http/put_file/poll_until.
+        # For receive_email the URL is fixed (_AGENTMAIL_API_BASE); check that host.
         try:
             if isinstance(step, (HttpStep, PutFileStep, PollUntilStep)):
                 rendered_url = _render_string(step.url, state)
                 err = _check_url_allowed(rendered_url, allowlist)
+                if err:
+                    steps_out.append({
+                        "step": f"{step.id}: blocked by sandbox",
+                        "step_id": step.id,
+                        "status": 0, "body": "", "elapsed_ms": 0, "error": err,
+                    })
+                    return
+            elif isinstance(step, ReceiveEmailStep):
+                err = _check_url_allowed(_AGENTMAIL_API_BASE, allowlist)
                 if err:
                     steps_out.append({
                         "step": f"{step.id}: blocked by sandbox",
@@ -520,6 +708,8 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
                 rec = _run_wait(step)
             elif isinstance(step, PollUntilStep):
                 rec = _run_poll_until(step, state)
+            elif isinstance(step, ReceiveEmailStep):
+                rec = _run_receive_email(step, state)
             else:
                 rec = {"step": f"{getattr(step, 'id', '?')}: unknown step kind",
                        "step_id": getattr(step, "id", "?"),
