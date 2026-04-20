@@ -19,8 +19,10 @@ will still fail the verifier's GET /v0/inboxes probe.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -231,25 +233,58 @@ def _minimal_agent_env() -> dict[str, str]:
 
 def _audit_log_invocation(
     model: str, timeout_s: int, prompt_len: int, env_keys: list[str],
-    sandboxed: bool,
+    sandbox_kind: str,
 ) -> None:
     """Structured log of each agent invocation. Grep target for ops.
 
     Deliberately does NOT log prompt content or API key values — just the
     shape of the call. Full prompt ends up in evidence/ per-run anyway.
+
+    sandbox_kind: "daytona" | "bwrap" | "none" — which isolation layer
+    was used. Lets ops verify which sandbox each test actually ran under.
     """
     print(
         f"[agent.runtime.invoke] model={model} timeout={timeout_s}s "
         f"prompt_chars={prompt_len} env_keys={sorted(env_keys)} "
-        f"fs_sandbox={'bwrap' if sandboxed else 'none'}"
+        f"sandbox={sandbox_kind}"
     )
 
 
-# bwrap presence is probed once at import time. On systems without bwrap we
-# fall back to un-sandboxed exec — better than failing closed when the
-# sandbox tool is missing, but we log it loudly so ops can notice.
+# Sandbox selection is a preference ladder:
+#   1. Daytona (Tier 2, full container isolation) if DAYTONA_API_KEY is set
+#   2. bwrap (Tier 1, namespace isolation on the host VM) if /usr/bin/bwrap exists
+#   3. Unsandboxed (last resort; logged loudly)
+#
+# Daytona runs the agent inside a fresh container per invocation, destroyed
+# after. bwrap runs the agent on the host VM with filesystem masking.
+# Both protect against prompt-injection exfiltration of host .env files,
+# but Daytona also isolates network egress and provides per-test ephemeral
+# state. Wallet install is gated on Daytona being the active sandbox.
+
 import shutil as _shutil
 _HAS_BWRAP = _shutil.which("bwrap") is not None
+_HAS_DAYTONA = bool(os.environ.get("DAYTONA_API_KEY"))
+
+# Lazily-initialized Daytona client — the SDK is heavy (pulls in aiohttp,
+# opentelemetry, etc.) so don't pay the import cost unless we actually use it.
+_daytona_client = None
+
+
+def _get_daytona_client():
+    global _daytona_client
+    if _daytona_client is None:
+        from daytona import Daytona, DaytonaConfig  # type: ignore
+        _daytona_client = Daytona(DaytonaConfig(api_key=os.environ["DAYTONA_API_KEY"]))
+    return _daytona_client
+
+
+def active_sandbox_kind() -> str:
+    """Which sandbox the next agent invocation will use. Public for ops/tests."""
+    if _HAS_DAYTONA:
+        return "daytona"
+    if _HAS_BWRAP:
+        return "bwrap"
+    return "none"
 
 
 def _bwrap_command(cmd: list[str]) -> list[str]:
@@ -306,34 +341,251 @@ def _run_once(
 ) -> AgentRunResult:
     """Single invocation of the Gemini CLI. Public runner is `run_agent_task`.
 
-    Tier 1 hardening applied:
-      - Env is built from allowlist only (_minimal_agent_env), NOT inherited.
-      - Every invocation is logged structurally for audit.
-      - Filesystem isolation is Tier 2 (Docker-per-test); until then the
-        agent subprocess can still read any file the onlybots user can.
-        Known gap, documented explicitly.
+    Dispatches to the strongest available sandbox:
+      - Daytona  (Tier 2: per-test container, network-isolated, ephemeral)
+      - bwrap    (Tier 1: namespace-masked filesystem on the host VM)
+      - raw      (no sandbox — logged loudly, never preferred)
+
+    All three paths enforce env-scoping and emit an audit log line so ops
+    can verify which sandbox each test actually used.
+    """
+    if _HAS_DAYTONA:
+        return _run_once_daytona(
+            prompt, expected_artifacts, model, timeout_s, cwd, reminder=reminder
+        )
+    return _run_once_bwrap(
+        prompt, expected_artifacts, model, timeout_s, cwd, reminder=reminder
+    )
+
+
+def _parse_agent_stdout(
+    stdout: str, expected_artifacts: list[str], model: str, elapsed: float,
+    exit_code: int | None, stderr_tail: str = "",
+) -> AgentRunResult:
+    """Shared: turn raw gemini stdout into an AgentRunResult.
+
+    Both daytona and bwrap paths end with "we have stdout + exit code, now
+    parse the ARTIFACTS block" — keep that logic in one place so the two
+    paths can't silently diverge on result shape.
+    """
+    raw_tail = stdout[-2000:]
+
+    if exit_code is not None and exit_code != 0 and not stdout.strip():
+        return AgentRunResult(
+            status="error", elapsed_s=elapsed, model=model, exit_code=exit_code,
+            stderr_tail=stderr_tail, raw_output=raw_tail,
+            error=f"agent exited {exit_code} with no stdout",
+        )
+
+    found_marker, parsed = _extract_last_artifacts_block(stdout)
+
+    if not found_marker:
+        return AgentRunResult(
+            status="malformed", elapsed_s=elapsed, model=model, exit_code=exit_code,
+            raw_output=raw_tail, stderr_tail=stderr_tail,
+            error="no 'ARTIFACTS:' block found in agent output",
+        )
+    if parsed is None:
+        return AgentRunResult(
+            status="malformed", elapsed_s=elapsed, model=model, exit_code=exit_code,
+            raw_output=raw_tail, stderr_tail=stderr_tail,
+            error="'ARTIFACTS:' marker present but JSON failed to parse",
+        )
+    if not isinstance(parsed, dict):
+        return AgentRunResult(
+            status="malformed", elapsed_s=elapsed, model=model, exit_code=exit_code,
+            raw_output=raw_tail, stderr_tail=stderr_tail,
+            error=f"ARTIFACTS must be a JSON object, got {type(parsed).__name__}",
+        )
+
+    artifacts = dict(parsed)
+    missing = [k for k in expected_artifacts
+               if k not in artifacts or artifacts[k] in (None, "", [], {})]
+    if missing:
+        return AgentRunResult(
+            status="missing_keys", elapsed_s=elapsed, model=model, exit_code=exit_code,
+            artifacts=artifacts, missing_keys=missing,
+            raw_output=raw_tail, stderr_tail=stderr_tail,
+            error=f"ARTIFACTS parsed but missing/empty keys: {missing}",
+        )
+
+    return AgentRunResult(
+        status="ok", elapsed_s=elapsed, model=model, exit_code=exit_code,
+        artifacts=artifacts, raw_output=raw_tail, stderr_tail=stderr_tail,
+    )
+
+
+def _run_once_daytona(
+    prompt: str,
+    expected_artifacts: list[str],
+    model: str,
+    timeout_s: int,
+    cwd: str,
+    reminder: bool = False,
+) -> AgentRunResult:
+    """Run the agent inside a fresh Daytona sandbox.
+
+    Per-invocation lifecycle:
+      1. Create sandbox (~0.2s)
+      2. Install gemini CLI (~10s; cached across image if we ever build one)
+      3. Write prompt to a file inside the sandbox (base64-encoded transport
+         so arbitrary prompt content can't break the shell)
+      4. Invoke gemini with GEMINI_API_KEY in per-exec env only
+      5. Parse stdout with the shared parser
+      6. Destroy sandbox (finally; sandbox leak is a real cost bug)
+
+    If ANY step above fails with an infrastructure error (Daytona API error,
+    network, timeout), we return an error-status AgentRunResult and DO NOT
+    retry at this layer. The caller (run_agent_task) handles retries.
+
+    Security properties:
+      - Host filesystem is invisible to the agent (no /opt/onlybots, no .env)
+      - Network egress from sandbox goes out to Daytona's infra, not our VM
+      - GEMINI_API_KEY is ephemeral to the sandbox (destroyed on cleanup)
+      - No pre-provisioned service keys, no Twilio creds, no wallet seed
+      - Sandbox destruction is in `finally` — no persistence across tests
     """
     full_prompt = _build_prompt(prompt, expected_artifacts, reminder=reminder)
-
-    # Minimal env — Tier 1.1 fix. No pre-provisioned service keys
-    # inherited, no DB URL, no Twilio credentials visible to the subprocess.
     env = _minimal_agent_env()
-
-    # bwrap filesystem isolation — Tier 1.2. Hides /opt/onlybots and
-    # /home/onlybots from the agent subprocess so it can't read .env files
-    # or evidence from prior runs. Falls back to unwrapped exec if bwrap
-    # isn't installed (logged loudly at invoke time).
-    base_cmd = ["gemini", "-m", model, "--yolo", "-p", full_prompt]
-    if _HAS_BWRAP:
-        cmd = _bwrap_command(base_cmd)
-    else:
-        cmd = base_cmd
-        print("[agent.runtime.WARNING] bwrap not available — running agent "
-              "WITHOUT filesystem sandbox. Install bubblewrap on the host.")
+    gemini_key = env.get("GEMINI_API_KEY", "")
+    if not gemini_key:
+        return AgentRunResult(
+            status="error", model=model, elapsed_s=0.0,
+            error="GEMINI_API_KEY not set — agent cannot authenticate",
+        )
 
     _audit_log_invocation(
         model, timeout_s, len(full_prompt), list(env.keys()),
-        sandboxed=_HAS_BWRAP,
+        sandbox_kind="daytona",
+    )
+
+    t_start = time.time()
+    sandbox = None
+    try:
+        daytona = _get_daytona_client()
+        try:
+            sandbox = daytona.create()
+        except Exception as e:
+            return AgentRunResult(
+                status="error", model=model,
+                elapsed_s=round(time.time() - t_start, 2),
+                error=f"daytona create failed: {type(e).__name__}: {e}",
+            )
+
+        # 1. Install gemini CLI. ~10s. Node + npm are already in Daytona's
+        # default image. We strip to stderr because `2>&1 >/dev/null` keeps
+        # stdout silent unless something real goes wrong.
+        try:
+            install_r = sandbox.process.exec(
+                "npm install -g @google/gemini-cli 2>&1 >/dev/null",
+                timeout=120,
+            )
+        except Exception as e:
+            return AgentRunResult(
+                status="error", model=model,
+                elapsed_s=round(time.time() - t_start, 2),
+                error=f"daytona install-exec failed: {type(e).__name__}: {e}",
+            )
+        if install_r.exit_code != 0:
+            return AgentRunResult(
+                status="error", model=model,
+                elapsed_s=round(time.time() - t_start, 2),
+                exit_code=install_r.exit_code,
+                stderr_tail=str(install_r.result)[-500:],
+                error="gemini CLI install failed inside Daytona sandbox",
+            )
+
+        # 2. Transport the prompt via base64. Avoids CLI argument length
+        # limits (ARG_MAX) and all shell-escaping concerns.
+        prompt_b64 = base64.b64encode(full_prompt.encode("utf-8")).decode("ascii")
+        write_cmd = f"echo '{prompt_b64}' | base64 -d > /tmp/onlybots_prompt.txt"
+        try:
+            write_r = sandbox.process.exec(write_cmd, timeout=15)
+        except Exception as e:
+            return AgentRunResult(
+                status="error", model=model,
+                elapsed_s=round(time.time() - t_start, 2),
+                error=f"daytona prompt-write failed: {type(e).__name__}: {e}",
+            )
+        if write_r.exit_code != 0:
+            return AgentRunResult(
+                status="error", model=model,
+                elapsed_s=round(time.time() - t_start, 2),
+                exit_code=write_r.exit_code,
+                error=f"prompt write to sandbox failed: {str(write_r.result)[-200:]}",
+            )
+
+        # 3. Run gemini. The env= dict scopes GEMINI_API_KEY to just this exec.
+        run_cmd = (
+            f"gemini --yolo -m {shlex.quote(model)} "
+            f"-p \"$(cat /tmp/onlybots_prompt.txt)\" 2>&1"
+        )
+        try:
+            run_r = sandbox.process.exec(
+                run_cmd,
+                env={"GEMINI_API_KEY": gemini_key},
+                timeout=timeout_s,
+            )
+        except Exception as e:
+            # Timeout from the SDK surfaces as an exception too
+            msg = f"{type(e).__name__}: {e}"
+            status = "timeout" if "timeout" in msg.lower() else "error"
+            return AgentRunResult(
+                status=status, model=model,
+                elapsed_s=round(time.time() - t_start, 2),
+                error=f"daytona run-exec failed: {msg}",
+            )
+
+        elapsed = round(time.time() - t_start, 2)
+        return _parse_agent_stdout(
+            stdout=str(run_r.result or ""),
+            expected_artifacts=expected_artifacts,
+            model=model,
+            elapsed=elapsed,
+            exit_code=run_r.exit_code,
+            stderr_tail="",
+        )
+    finally:
+        if sandbox is not None:
+            try:
+                sandbox.delete()
+            except Exception as e:
+                # Loud log but don't fail the test — a lingering sandbox costs
+                # money but doesn't corrupt results. Surface via metrics later.
+                print(f"[agent.runtime.WARNING] daytona sandbox delete failed "
+                      f"(sandbox may persist): {type(e).__name__}: {e}")
+
+
+def _run_once_bwrap(
+    prompt: str,
+    expected_artifacts: list[str],
+    model: str,
+    timeout_s: int,
+    cwd: str,
+    reminder: bool = False,
+) -> AgentRunResult:
+    """Tier 1 sandbox: bwrap namespaces on the host VM.
+
+    Kept as the fallback path when DAYTONA_API_KEY is unset. Env scoping
+    applied, filesystem masked, kernel namespaces unshared. See _bwrap_command
+    for the exact isolation flags.
+    """
+    full_prompt = _build_prompt(prompt, expected_artifacts, reminder=reminder)
+    env = _minimal_agent_env()
+
+    base_cmd = ["gemini", "-m", model, "--yolo", "-p", full_prompt]
+    if _HAS_BWRAP:
+        cmd = _bwrap_command(base_cmd)
+        kind = "bwrap"
+    else:
+        cmd = base_cmd
+        kind = "none"
+        print("[agent.runtime.WARNING] no sandbox available — running agent "
+              "WITHOUT isolation. Install bubblewrap or set DAYTONA_API_KEY.")
+
+    _audit_log_invocation(
+        model, timeout_s, len(full_prompt), list(env.keys()),
+        sandbox_kind=kind,
     )
 
     t0 = time.time()
@@ -360,56 +612,11 @@ def _run_once(
         )
 
     elapsed = round(time.time() - t0, 2)
-    stdout = completed.stdout or ""
-    stderr = completed.stderr or ""
-
-    if completed.returncode != 0 and not stdout.strip():
-        return AgentRunResult(
-            status="error", elapsed_s=elapsed, model=model,
-            exit_code=completed.returncode,
-            stderr_tail=stderr[-500:],
-            error=f"agent exited {completed.returncode} with no stdout",
-        )
-
-    found_marker, parsed = _extract_last_artifacts_block(stdout)
-    raw_tail = stdout[-2000:]
-
-    if not found_marker:
-        return AgentRunResult(
-            status="malformed", elapsed_s=elapsed, model=model,
-            exit_code=completed.returncode,
-            raw_output=raw_tail, stderr_tail=stderr[-500:],
-            error="no 'ARTIFACTS:' block found in agent output",
-        )
-    if parsed is None:
-        return AgentRunResult(
-            status="malformed", elapsed_s=elapsed, model=model,
-            exit_code=completed.returncode,
-            raw_output=raw_tail, stderr_tail=stderr[-500:],
-            error="'ARTIFACTS:' marker present but JSON failed to parse",
-        )
-    if not isinstance(parsed, dict):
-        return AgentRunResult(
-            status="malformed", elapsed_s=elapsed, model=model,
-            exit_code=completed.returncode,
-            raw_output=raw_tail, stderr_tail=stderr[-500:],
-            error=f"ARTIFACTS must be a JSON object, got {type(parsed).__name__}",
-        )
-
-    artifacts = {k: v for k, v in parsed.items()}
-    missing = [k for k in expected_artifacts
-               if k not in artifacts or artifacts[k] in (None, "", [], {})]
-    if missing:
-        return AgentRunResult(
-            status="missing_keys", elapsed_s=elapsed, model=model,
-            exit_code=completed.returncode,
-            artifacts=artifacts, missing_keys=missing,
-            raw_output=raw_tail, stderr_tail=stderr[-500:],
-            error=f"ARTIFACTS parsed but missing/empty keys: {missing}",
-        )
-
-    return AgentRunResult(
-        status="ok", elapsed_s=elapsed, model=model,
+    return _parse_agent_stdout(
+        stdout=completed.stdout or "",
+        expected_artifacts=expected_artifacts,
+        model=model,
+        elapsed=elapsed,
         exit_code=completed.returncode,
-        artifacts=artifacts, raw_output=raw_tail, stderr_tail=stderr[-500:],
+        stderr_tail=(completed.stderr or "")[-500:],
     )
