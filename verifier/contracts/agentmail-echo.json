@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "service_slug": "agentmail-echo",
-  "notes": "Self-test contract for receive_email primitive. Exercises send-and-receive loop to verifier's own inbox (onlybots@agentmail.co). The verifier sends a nonce-tagged email to itself, then polls receive_email until the message arrives. Proves the inbox is live, the API key works, and receive_email correctly filters + extracts from arrived mail.",
+  "notes": "Self-test contract for receive_email primitive. Exercises send-and-receive loop to verifier's own inbox (onlybots@agentmail.to). The verifier sends a nonce-tagged email to itself, then polls receive_email until the message arrives. Proves the inbox is live, the API key works, and receive_email correctly filters + extracts from arrived mail.",
   "allowed_env": ["AGENTMAIL_API_KEY", "AGENTMAIL_INBOX_ID"],
   "sandbox": {
     "url_allowlist": ["api.agentmail.to"]
@@ -22,7 +22,7 @@
           "id": "load_inbox_id",
           "env_var": "AGENTMAIL_INBOX_ID",
           "state_key": "agentmail_inbox_id",
-          "description": "Load verifier inbox ID (UUID for onlybots@agentmail.co)"
+          "description": "Load verifier inbox ID (UUID for onlybots@agentmail.to)"
         },
         {
           "kind": "inject_nonce",
@@ -38,7 +38,7 @@
           "url": "https://api.agentmail.to/v0/inboxes/{agentmail_inbox_id}/messages/send",
           "headers": {"Authorization": "Bearer {agentmail_api_key}"},
           "body_json": {
-            "to": ["onlybots@agentmail.co"],
+            "to": ["onlybots@agentmail.to"],
             "subject": "OnlyBots echo self-test",
             "text": "nonce={echo_nonce}"
           },
@@ -47,7 +47,7 @@
         {
           "kind": "receive_email",
           "id": "receive_echo",
-          "inbox": "onlybots@agentmail.co",
+          "inbox": "onlybots@agentmail.to",
           "match": {
             "subject_regex": "OnlyBots echo self-test",
             "body_contains": "{echo_nonce}"
@@ -126,7 +126,7 @@
           "url": "https://api.agentmail.to/v0/inboxes/{agentmail_inbox_id}/messages/send",
           "headers": {"Authorization": "Bearer {agentmail_api_key}"},
           "body_json": {
-            "to": ["onlybots@agentmail.co"],
+            "to": ["onlybots@agentmail.to"],
             "subject": "OnlyBots workflow self-test",
             "text": "workflow-nonce={workflow_nonce}"
           },
@@ -135,7 +135,7 @@
         {
           "kind": "receive_email",
           "id": "receive_workflow_email",
-          "inbox": "onlybots@agentmail.co",
+          "inbox": "onlybots@agentmail.to",
           "match": {
             "subject_regex": "OnlyBots workflow self-test",
             "body_contains": "{workflow_nonce}"
