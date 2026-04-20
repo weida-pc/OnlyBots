@@ -34,7 +34,7 @@ import executor as _legacy
 from .schema import (
     Contract, TestSpec, AgentTask,
     HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep, PollUntilStep,
-    ReceiveEmailStep,
+    ReceiveEmailStep, SendSmsStep, ReceiveSmsStep,
     HttpStatusOk, ArtifactPresent, ContentServesNonce,
 )
 
@@ -338,6 +338,9 @@ def _run_poll_until(step: PollUntilStep, state: dict) -> dict:
 _RECEIVE_EMAIL_MATCH_KEYS = {"from_contains", "subject_regex", "body_contains"}
 _AGENTMAIL_API_BASE = "https://api.agentmail.to/v0"
 
+_TWILIO_API_BASE = "https://api.twilio.com/2010-04-01"
+_RECEIVE_SMS_MATCH_KEYS = {"from_contains", "body_contains", "body_regex"}
+
 
 def _run_receive_email(step: ReceiveEmailStep, state: dict) -> dict:
     """Poll an AgentMail inbox until a matching message arrives or attempts exhausted.
@@ -512,6 +515,224 @@ def _run_receive_email(step: ReceiveEmailStep, state: dict) -> dict:
     }
 
 
+def _run_send_sms(step: SendSmsStep, state: dict, contract: Contract) -> dict:
+    """Send an outbound SMS via the Twilio Messages API using API key auth.
+
+    Uses Basic Auth with TWILIO_API_KEY_SID:TWILIO_API_KEY_SECRET per
+    https://www.twilio.com/docs/iam/api-keys. The response SID is stored in
+    state as {step.id}_message_sid for downstream correlation.
+
+    api.twilio.com must be in the contract's url_allowlist (enforced by the
+    caller's sandbox check before this function is reached).
+    """
+    # Read credentials from env — all must be in contract.allowed_env
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "")
+    api_key_sid = os.environ.get("TWILIO_API_KEY_SID", "")
+    api_key_secret = os.environ.get("TWILIO_API_KEY_SECRET", "")
+    from_number = os.environ.get("TWILIO_PHONE_NUMBER", "")
+
+    missing_env = [k for k, v in {
+        "TWILIO_ACCOUNT_SID": account_sid,
+        "TWILIO_API_KEY_SID": api_key_sid,
+        "TWILIO_API_KEY_SECRET": api_key_secret,
+        "TWILIO_PHONE_NUMBER": from_number,
+    }.items() if not v]
+    if missing_env:
+        return {
+            "step": f"{step.id}: {step.description or 'send_sms'}",
+            "step_id": step.id,
+            "status": 0, "body": "", "elapsed_ms": 0,
+            "error": f"missing env vars: {missing_env}",
+        }
+
+    # Template-render destination and message body
+    to_number = _render_string(step.to, state)
+    sms_body = _render_string(step.body, state)
+
+    # Build form-encoded body per Twilio Messages API spec
+    form_data = urllib.parse.urlencode({
+        "From": from_number,
+        "To": to_number,
+        "Body": sms_body,
+    })
+    url = f"{_TWILIO_API_BASE}/Accounts/{account_sid}/Messages.json"
+
+    # Basic Auth: API Key SID as username, API Key Secret as password
+    import base64
+    credentials = base64.b64encode(
+        f"{api_key_sid}:{api_key_secret}".encode("utf-8")
+    ).decode("ascii")
+
+    resp = _legacy._http_request(
+        "POST", url,
+        body=form_data.encode("utf-8"),
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": f"Basic {credentials}",
+        },
+    )
+
+    # Twilio returns 201 Created on success
+    status = resp.get("status", 0)
+    if status != 201:
+        return {
+            "step": f"{step.id}: {step.description or f'send_sms to {to_number}'}",
+            "step_id": step.id,
+            "status": status,
+            "body": resp.get("body", "")[:500],
+            "elapsed_ms": resp.get("elapsed_ms", 0),
+            "error": f"Twilio returned HTTP {status} (expected 201)",
+        }
+
+    # Extract the message SID for downstream correlation
+    try:
+        msg_data = json.loads(resp.get("body", "") or "{}")
+        msg_sid = msg_data.get("sid", "")
+        if msg_sid:
+            state[f"{step.id}_message_sid"] = msg_sid
+    except Exception:
+        msg_sid = ""
+
+    return {
+        "step": f"{step.id}: {step.description or f'send_sms to {to_number}'}",
+        "step_id": step.id,
+        "status": status,
+        "body": f"sid={msg_sid} to={to_number} status={msg_data.get('status', '?')}",
+        "elapsed_ms": resp.get("elapsed_ms", 0),
+        "error": None,
+    }
+
+
+def _run_receive_sms(step: ReceiveSmsStep, state: dict) -> dict:
+    """Poll twilio_inbound_sms table until a matching SMS arrives or max_attempts exhausted.
+
+    Only messages received at or after step-entry time (t_start) are considered,
+    preventing matches from old/stale messages.
+
+    The returned body is a brief summary — never the full SMS body — to keep
+    step records small and avoid logging sensitive content.
+    """
+    import datetime
+
+    # Determine which phone number to watch
+    to_number = (_render_string(step.to_number, state)
+                 if step.to_number else os.environ.get("TWILIO_PHONE_NUMBER", ""))
+    if not to_number:
+        return {
+            "step": f"{step.id}: {step.description or 'receive_sms'}",
+            "step_id": step.id,
+            "status": 0, "body": "", "elapsed_ms": 0,
+            "error": "to_number not set and TWILIO_PHONE_NUMBER env var not set",
+            "attempts": 0, "extracted": {},
+        }
+
+    rendered_match = {k: _render_string(v, state) for k, v in step.match.items()}
+
+    # Watermark: only consider messages after step entry
+    import db as _db
+    t_start = datetime.datetime.now(datetime.timezone.utc)
+    t0_monotonic = time.monotonic()
+
+    attempts = 0
+    last_db_error = None
+
+    for attempt in range(1, step.max_attempts + 1):
+        attempts = attempt
+        elapsed_ms = int((time.monotonic() - t0_monotonic) * 1000)
+
+        try:
+            conn = _db.get_conn()
+            try:
+                import psycopg2.extras
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        SELECT message_sid, from_number, body, received_at
+                        FROM twilio_inbound_sms
+                        WHERE to_number = %s AND received_at >= %s
+                        ORDER BY received_at ASC
+                        """,
+                        (to_number, t_start),
+                    )
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            last_db_error = str(e)
+            if attempt < step.max_attempts:
+                time.sleep(step.interval_s)
+            continue
+
+        for row in rows:
+            from_num = row["from_number"] or ""
+            sms_body = row["body"] or ""
+            received_at = row["received_at"]
+
+            # Apply AND-semantics match filters
+            if "from_contains" in rendered_match:
+                if rendered_match["from_contains"] not in from_num:
+                    continue
+            if "body_contains" in rendered_match:
+                if rendered_match["body_contains"] not in sms_body:
+                    continue
+            if "body_regex" in rendered_match:
+                if not re.search(rendered_match["body_regex"], sms_body):
+                    continue
+
+            # All filters passed — extract and return
+            extracted: dict = {}
+            for state_key, expr in step.extract.items():
+                if expr.startswith("regex:"):
+                    pattern = expr[len("regex:"):]
+                    m = re.search(pattern, sms_body)
+                    val = m.group(1) if (m and m.lastindex and m.lastindex >= 1) else None
+                elif expr == "body":
+                    val = sms_body
+                elif expr == "from_number":
+                    val = from_num
+                elif expr == "received_at":
+                    val = received_at.isoformat() if hasattr(received_at, "isoformat") else str(received_at)
+                else:
+                    val = None
+                if val is not None:
+                    state[state_key] = val
+                    extracted[state_key] = val
+
+            # Summary only — no full body in step record
+            preview = sms_body[:40] + ("…" if len(sms_body) > 40 else "")
+            summary = f"from={from_num!r} body={preview!r}"
+            if extracted:
+                summary += f" extracted={list(extracted.keys())}"
+
+            return {
+                "step": f"{step.id}: {step.description or f'receive_sms on {to_number}'}",
+                "step_id": step.id,
+                "status": 200,
+                "body": summary,
+                "elapsed_ms": int((time.monotonic() - t0_monotonic) * 1000),
+                "error": None,
+                "attempts": attempts,
+                "extracted": extracted,
+            }
+
+        # No match yet — sleep and retry
+        if attempt < step.max_attempts:
+            time.sleep(step.interval_s)
+
+    elapsed_ms = int((time.monotonic() - t0_monotonic) * 1000)
+    err_msg = f"no matching SMS received after {step.max_attempts} attempts"
+    if last_db_error:
+        err_msg += f" (last DB error: {last_db_error})"
+    return {
+        "step": f"{step.id}: {step.description or f'receive_sms on {to_number}'}",
+        "step_id": step.id,
+        "status": 0, "body": "",
+        "elapsed_ms": elapsed_ms,
+        "error": err_msg,
+        "attempts": attempts, "extracted": {},
+    }
+
+
 # ── URL allowlist enforcement (speed bump, NOT a sandbox) ─────────────────────
 
 def _host_matches(host: str, pattern: str) -> bool:
@@ -662,6 +883,7 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
     #      agent_task is absent.
     setup_kinds = (InjectNonceStep, EnvSecretStep, WaitStep)
     setup_steps = [s for s in test.steps if isinstance(s, setup_kinds)]
+    # send_sms and receive_sms are probe steps (run after setup + agent_task)
     probe_steps = [s for s in test.steps if not isinstance(s, setup_kinds)]
 
     def _execute_one(step: Any) -> None:
@@ -687,6 +909,17 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
                         "status": 0, "body": "", "elapsed_ms": 0, "error": err,
                     })
                     return
+            elif isinstance(step, SendSmsStep):
+                # Check that api.twilio.com is in the allowlist before sending
+                err = _check_url_allowed(_TWILIO_API_BASE, allowlist)
+                if err:
+                    steps_out.append({
+                        "step": f"{step.id}: blocked by sandbox",
+                        "step_id": step.id,
+                        "status": 0, "body": "", "elapsed_ms": 0, "error": err,
+                    })
+                    return
+            # receive_sms uses only DB (no outbound URL to check)
         except TemplateError as e:
             steps_out.append({
                 "step": f"{step.id}: template error",
@@ -710,6 +943,10 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
                 rec = _run_poll_until(step, state)
             elif isinstance(step, ReceiveEmailStep):
                 rec = _run_receive_email(step, state)
+            elif isinstance(step, SendSmsStep):
+                rec = _run_send_sms(step, state, contract)
+            elif isinstance(step, ReceiveSmsStep):
+                rec = _run_receive_sms(step, state)
             else:
                 rec = {"step": f"{getattr(step, 'id', '?')}: unknown step kind",
                        "step_id": getattr(step, "id", "?"),

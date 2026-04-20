@@ -20,7 +20,7 @@ from typing import Any
 from .schema import (
     Contract, TestSpec, Sandbox, AgentTask,
     HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep, PollUntilStep,
-    ReceiveEmailStep,
+    ReceiveEmailStep, SendSmsStep, ReceiveSmsStep,
     HttpStatusOk, ArtifactPresent, ContentServesNonce,
 )
 
@@ -48,6 +48,9 @@ _STEP_KIND_ALLOWED_FIELDS: dict[str, set[str]] = {
                    "body_json", "extract", "interval_s", "max_attempts", "description"},
     "receive_email": {"kind", "id", "inbox", "match", "extract",
                       "interval_s", "max_attempts", "description"},
+    "send_sms": {"kind", "id", "to", "body", "description"},
+    "receive_sms": {"kind", "id", "to_number", "match", "extract",
+                    "interval_s", "max_attempts", "description"},
 }
 
 _ASSERTION_KIND_ALLOWED_FIELDS: dict[str, set[str]] = {
@@ -154,6 +157,36 @@ def _parse_step(raw: dict, ctx: str) -> Any:
         return ReceiveEmailStep(
             kind="receive_email", id=raw["id"],
             inbox=raw["inbox"],
+            match=match,
+            extract=extract,
+            interval_s=float(raw.get("interval_s", 3.0)),
+            max_attempts=int(raw.get("max_attempts", 20)),
+            description=raw.get("description", ""),
+        )
+    if kind == "send_sms":
+        _require_keys(raw, ["to", "body"], ctx)
+        return SendSmsStep(
+            kind="send_sms", id=raw["id"],
+            to=raw["to"],
+            body=raw["body"],
+            description=raw.get("description", ""),
+        )
+    if kind == "receive_sms":
+        match = raw.get("match", {}) or {}
+        if not isinstance(match, dict):
+            raise ContractError(f"{ctx}: receive_sms.match must be a dict")
+        _allowed_sms_match_keys = {"from_contains", "body_contains", "body_regex"}
+        unknown_match = set(match.keys()) - _allowed_sms_match_keys
+        if unknown_match:
+            raise ContractError(
+                f"{ctx}: receive_sms.match has unknown key(s) {sorted(unknown_match)}; "
+                f"allowed: {sorted(_allowed_sms_match_keys)}")
+        extract = raw.get("extract", {}) or {}
+        if not isinstance(extract, dict):
+            raise ContractError(f"{ctx}: receive_sms.extract must be a dict")
+        return ReceiveSmsStep(
+            kind="receive_sms", id=raw["id"],
+            to_number=raw.get("to_number", ""),
             match=match,
             extract=extract,
             interval_s=float(raw.get("interval_s", 3.0)),

@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-StepKind = Literal["http", "put_file", "inject_nonce", "env_secret", "wait", "poll_until", "receive_email"]
+StepKind = Literal["http", "put_file", "inject_nonce", "env_secret", "wait", "poll_until", "receive_email", "send_sms", "receive_sms"]
 
 
 @dataclass
@@ -149,7 +149,52 @@ class ReceiveEmailStep:
     description: str = ""
 
 
-Step = HttpStep | PutFileStep | InjectNonceStep | EnvSecretStep | WaitStep | PollUntilStep | ReceiveEmailStep
+@dataclass
+class SendSmsStep:
+    """Send an outbound SMS via Twilio using API key auth.
+
+    Credentials are read from env: TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID,
+    TWILIO_API_KEY_SECRET, TWILIO_PHONE_NUMBER. All must appear in
+    contract.allowed_env. The target host (api.twilio.com) must be in
+    contract.sandbox.url_allowlist.
+    """
+    kind: Literal["send_sms"]
+    id: str
+    to: str                                  # templated; E.164 format required
+    body: str                                # templated
+    description: str = ""
+
+
+@dataclass
+class ReceiveSmsStep:
+    """Poll the twilio_inbound_sms DB table until a matching SMS arrives.
+
+    Watches `to_number` (defaults to env TWILIO_PHONE_NUMBER) for messages
+    arriving after step entry. All match filters are ANDed. Extract values
+    are written to state for later steps/assertions.
+
+    match keys (all optional, ANDed):
+      from_contains  — substring check on from_number
+      body_contains  — substring check on body
+      body_regex     — Python re.search on body
+
+    extract values:
+      "regex:PATTERN" — first capture group from body
+      "body"          — the SMS body text
+      "from_number"   — sender number
+      "received_at"   — ISO 8601 timestamp
+    """
+    kind: Literal["receive_sms"]
+    id: str
+    to_number: str = ""                      # templated; defaults to env TWILIO_PHONE_NUMBER
+    match: dict[str, str] = field(default_factory=dict)
+    extract: dict[str, str] = field(default_factory=dict)
+    interval_s: float = 3.0
+    max_attempts: int = 20
+    description: str = ""
+
+
+Step = HttpStep | PutFileStep | InjectNonceStep | EnvSecretStep | WaitStep | PollUntilStep | ReceiveEmailStep | SendSmsStep | ReceiveSmsStep
 
 
 # ── Assertion kinds ───────────────────────────────────────────────────────────

@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "service_slug": "twilio-echo",
+  "notes": "Phase B self-test contract for SMS primitives. Twilio explicitly rejects send-to-self (error 21266 'To and From number cannot be the same'), so we can't do a true self-echo round-trip. Instead the receive_sms primitive is validated against externally-triggered inbound SMS (any service that texts our number, or a manual send from another phone). This contract documents the expected shape; full round-trip validation happens when a real phone-OTP-gated service signup flows through the verifier.",
+  "allowed_env": [
+    "TWILIO_ACCOUNT_SID",
+    "TWILIO_API_KEY_SID",
+    "TWILIO_API_KEY_SECRET",
+    "TWILIO_PHONE_NUMBER"
+  ],
+  "sandbox": {
+    "url_allowlist": ["api.twilio.com"]
+  },
+  "tests": {
+    "signup": {
+      "produces": ["sms_nonce"],
+      "steps": [
+        {
+          "kind": "inject_nonce",
+          "id": "mint_nonce",
+          "state_key": "sms_nonce",
+          "prefix": "sms-verify",
+          "description": "Mint a unique nonce so waiting receive_sms can match a specific inbound message"
+        },
+        {
+          "kind": "receive_sms",
+          "id": "listen_for_inbound",
+          "match": {
+            "body_contains": "{sms_nonce}"
+          },
+          "extract": {
+            "received_body_preview": "regex:(.{0,80})"
+          },
+          "interval_s": 5.0,
+          "max_attempts": 6,
+          "description": "Wait briefly for any externally-triggered inbound SMS carrying our nonce. Expected to time out in automated runs (no external trigger); passes when a real service's signup flow SMSes our number with the nonce embedded."
+        }
+      ],
+      "assertions": [
+        {"kind": "artifact_present", "artifact": "sms_nonce",
+         "description": "nonce generation works"}
+      ]
+    },
+    "persistence": {
+      "requires": [],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "twilio_reachable",
+          "method": "GET",
+          "url": "https://api.twilio.com/2010-04-01/Accounts.json",
+          "description": "Basic reachability — expects 401 (no auth), proves api.twilio.com is reachable from the sandbox"
+        }
+      ],
+      "assertions": []
+    },
+    "workflow": {
+      "requires": [],
+      "produces": ["sent_sid"],
+      "steps": [
+        {
+          "kind": "send_sms",
+          "id": "send_to_self_expect_400",
+          "to": "+12183878415",
+          "body": "OnlyBots workflow probe — send primitive is wired up",
+          "description": "Exercise the send_sms primitive. Twilio will return HTTP 400 (21266) because trial accounts can't send to the same number — that's the expected outcome proving the primitive correctly reached Twilio and got a meaningful business response."
+        }
+      ],
+      "assertions": []
+    }
+  }
+}

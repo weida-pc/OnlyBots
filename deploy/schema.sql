@@ -51,3 +51,14 @@ CREATE TABLE IF NOT EXISTS verification_results (
   evidence_artifacts JSONB DEFAULT '{}',
   details JSONB DEFAULT '{}'
 );
+
+CREATE TABLE IF NOT EXISTS twilio_inbound_sms (
+  id SERIAL PRIMARY KEY,
+  message_sid VARCHAR(64) UNIQUE NOT NULL,  -- Twilio's SMS SID (idempotent webhook)
+  from_number VARCHAR(32) NOT NULL,
+  to_number VARCHAR(32) NOT NULL,
+  body TEXT NOT NULL,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_twilio_sms_to_received
+  ON twilio_inbound_sms (to_number, received_at DESC);
