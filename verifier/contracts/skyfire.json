@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "service_slug": "skyfire",
+  "notes": "Skyfire has NO programmatic account creation — signup is dashboard-only via email or Google OAuth (https://app.skyfire.xyz). API keys are provisioned per agent account in the dashboard. The verifier therefore uses a pre-provisioned SKYFIRE_API_KEY from env, the same pattern used for signbee. Real API base: https://api.skyfire.xyz/api/v1. Auth header: skyfire-api-key. Confirmed working endpoints: GET /api/v1/agents/balance (401 without key, correct JSON error otherwise), POST /api/v1/tokens (same), public JWKS at https://app.skyfire.xyz/.well-known/jwks.json. The JWKS endpoint is used as the unauthenticated HTTP probe to confirm the service is live.",
+  "allowed_env": ["SKYFIRE_API_KEY"],
+  "sandbox": {
+    "url_allowlist": ["api.skyfire.xyz", "app.skyfire.xyz"]
+  },
+  "tests": {
+    "signup": {
+      "produces": ["skyfire_api_key"],
+      "steps": [
+        {
+          "kind": "env_secret",
+          "id": "load_key",
+          "env_var": "SKYFIRE_API_KEY",
+          "state_key": "skyfire_api_key",
+          "required": true
+        },
+        {
+          "kind": "http",
+          "id": "probe_balance",
+          "method": "GET",
+          "url": "https://api.skyfire.xyz/api/v1/agents/balance",
+          "headers": {"skyfire-api-key": "{skyfire_api_key}"},
+          "description": "GET /api/v1/agents/balance — verifies API key is valid"
+        }
+      ],
+      "assertions": [
+        {"kind": "artifact_present", "artifact": "skyfire_api_key",
+         "description": "SKYFIRE_API_KEY env var was loaded"},
+        {"kind": "http_status_ok", "step": "probe_balance",
+         "description": "API key is accepted by Skyfire (balance endpoint returns 200)"}
+      ]
+    },
+    "persistence": {
+      "requires": ["skyfire_api_key"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "recheck_balance",
+          "method": "GET",
+          "url": "https://api.skyfire.xyz/api/v1/agents/balance",
+          "headers": {"skyfire-api-key": "{skyfire_api_key}"},
+          "description": "GET /api/v1/agents/balance (second call — key still valid)"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "recheck_balance",
+         "description": "credential still valid on re-auth"}
+      ]
+    },
+    "workflow": {
+      "requires": ["skyfire_api_key"],
+      "produces": ["skyfire_token"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "list_services",
+          "method": "GET",
+          "url": "https://api.skyfire.xyz/api/v1/agents/seller-services",
+          "headers": {"skyfire-api-key": "{skyfire_api_key}"},
+          "description": "GET /api/v1/agents/seller-services — list seller services for this agent"
+        },
+        {
+          "kind": "http",
+          "id": "jwks_check",
+          "method": "GET",
+          "url": "https://app.skyfire.xyz/.well-known/jwks.json",
+          "description": "GET /.well-known/jwks.json — public JWKS endpoint (no auth required, confirms service is live)"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "list_services",
+         "description": "seller-services list returns 200"},
+        {"kind": "http_status_ok", "step": "jwks_check",
+         "description": "JWKS endpoint returns 200 with public key"}
+      ]
+    }
+  }
+}

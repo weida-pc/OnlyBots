@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "service_slug": "moltmail",
+  "notes": "BLOCKED — REQUIRES EVM WALLET SIGNING (not achievable with the current HTTP-only primitives).\n\nMoltmail (moltmail.io, by EtherMail) cannot be provisioned via HTTP-only calls. The auth flow requires EVM wallet signing:\n  1. POST /nonce → returns a nonce integer\n  2. Agent must produce a secp256k1 signature over 'By signing this message you agree to the Terms and Conditions and Privacy Policy\\n\\nNONCE: {nonce}'\n  3. POST /authenticate with the signature → returns a JWT\n  4. First login: POST /users/onboarding with {email:'', isSso:false} + JWT → account created\n  5. Email is deterministic: {walletAddress.toLowerCase()}@moltmail.io\n\nThere is no API-key or password-based registration path. The wallet can be generated locally, but signing step 2 needs a crypto library (ethers.js/viem) — not curl-reachable. Once a JWT exists, all inbox operations are standard HTTPS to srv.ethermail.io.\n\nProbes confirmed 2026-04-20 by Sonnet reviewer:\n  POST /nonce                      → 200 {success:true, nonce:1}\n  POST /authenticate (bad sig)      → 403 {error:'Invalid signature length'}\n  POST /users/onboarding (no token) → 403 {error:'Invalid accessToken value'}\n\nSource: https://github.com/EtherMailOrg/moltmail-openclaw\n\nUNBLOCKING PATH: Add ethers.js (or a web3.py equivalent) to the agent sandbox, generate an ephemeral wallet, perform signing steps 2-4 programmatically. No human approval, CAPTCHA, or phone verification required — it's a pure crypto-library dependency. Same shape as ClawTasks which already relies on `npm install ethers` inside the Daytona sandbox.\n\nUntil the unblocking work lands, the tests below intentionally fail at the signup step so the verifier records an honest 'blocked' result rather than silently passing.",
+  "allowed_env": [],
+  "sandbox": {
+    "url_allowlist": ["srv.ethermail.io", "moltmail.io"]
+  },
+  "tests": {
+    "signup": {
+      "produces": ["moltmail_jwt"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "get_nonce",
+          "method": "POST",
+          "url": "https://srv.ethermail.io/nonce",
+          "headers": {"Content-Type": "application/json"},
+          "body_json": {"walletAddress": "0x000000000000000000000000000000000000dEaD"},
+          "extract": {"moltmail_nonce": "nonce"},
+          "description": "POST /nonce — confirms the endpoint is live. Signup cannot proceed further without secp256k1 signing, which the current primitives do not support."
+        },
+        {
+          "kind": "http",
+          "id": "authenticate_without_signing",
+          "method": "POST",
+          "url": "https://srv.ethermail.io/authenticate",
+          "headers": {"Content-Type": "application/json"},
+          "body_json": {
+            "web3Address": "0x000000000000000000000000000000000000dEaD@moltmail.io",
+            "signature": "0xdeadbeef",
+            "isMPC": false,
+            "platformData": {"ai_agent": true, "platform": "onlybots"}
+          },
+          "extract": {"moltmail_jwt": "token"},
+          "description": "POST /authenticate with a known-bad signature. Expected to 403 — which is the 'blocked' signal. When secp256k1 signing lands, this step gets replaced with a real signed payload."
+        }
+      ],
+      "assertions": [
+        {
+          "kind": "http_status_ok",
+          "step": "authenticate_without_signing",
+          "description": "INTENTIONALLY FAILS until EVM signing is wired. See notes."
+        },
+        {
+          "kind": "artifact_present",
+          "artifact": "moltmail_jwt",
+          "description": "INTENTIONALLY FAILS — no JWT is produced without a valid signature."
+        }
+      ]
+    }
+  }
+}

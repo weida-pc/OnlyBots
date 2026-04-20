@@ -41,7 +41,10 @@ from .schema import (
 
 # ── Templating ────────────────────────────────────────────────────────────────
 
-_TEMPLATE_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+# Matches either an escape sequence `{{ ... }}` (emitted as literal `{ ... }`)
+# OR a template var `{varname}`. The order matters: the escape alternative
+# is listed first so re.sub tries to match it before the single-brace form.
+_TEMPLATE_RE = re.compile(r"\{\{([^{}]*)\}\}|\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 
 class TemplateError(Exception):
@@ -52,12 +55,25 @@ class TemplateError(Exception):
 def _render_string(s: str, state: dict) -> str:
     """Replace {varname} with str(state[varname]). Missing vars raise TemplateError.
 
+    Escape syntax: `{{ literal }}` renders as `{ literal }` without variable
+    substitution. Use this for contract prompts that include code samples or
+    JSON examples containing braces (e.g. `const {{api_key}} = response` for
+    a JavaScript destructure, or `{{"key": "value"}}` for a JSON literal).
+    Without the escape, such prompts would trigger TemplateError because the
+    runner would try to substitute `{api_key}` / `{"key": "value"}` as state
+    variables.
+
     Also rejects templating non-scalar values (dict/list) since str() on those
     produces Python repr that breaks URLs, JSON bodies, and everything else.
-    The critique flagged silent type coercion here — this is the fix.
     """
     def sub(m: re.Match) -> str:
-        key = m.group(1)
+        # Group 1 is the {{escape}} inner content; group 2 is the {var} name.
+        # re.sub gives us the whole match; pick which branch was hit.
+        escaped, key = m.group(1), m.group(2)
+        if escaped is not None:
+            # Literal: emit with single braces around the content.
+            return "{" + escaped + "}"
+        # Normal variable substitution path
         if key not in state:
             raise TemplateError(f"template variable {{{key}}} not in state; "
                                 f"available keys: {sorted(state.keys())}")

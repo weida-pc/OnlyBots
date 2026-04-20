@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "service_slug": "nevermined",
+  "notes": "Nevermined has NO fully-programmatic signup. API key generation requires: (1) browser login to nevermined.app via Privy (social/email/wallet), (2) navigating to Settings > Global NVM API Keys, (3) clicking '+ New API Key'. There is no REST endpoint for account creation or API key generation — the /api/v1/api-keys/register-key endpoint requires a Privy identity token (browser-obtained) or a clientAssertion JWT signed by a pre-existing NVM wallet key. The facilitator also returns on-chain contract addresses (Base Sepolia), confirming crypto infra is core, not optional. Agent registration (POST /api/v1/protocol/agents) requires a bearer token from the above flow. Classification: Tier 3 (human dashboard step required to obtain credential). NOT 'Autonomous signup ✓' — that tag is inaccurate. The verifier uses a pre-provisioned NVM_API_KEY from env. Probe results: GET / → 200 (returns contract addresses), POST /agent without auth → 401. No wallet primitives exist in the current verifier, making autonomous first-time signup a genuine blocker.",
+  "allowed_env": ["NVM_API_KEY"],
+  "sandbox": {
+    "url_allowlist": ["facilitator.sandbox.nevermined.app"]
+  },
+  "tests": {
+    "signup": {
+      "produces": ["nvm_api_key"],
+      "steps": [
+        {
+          "kind": "env_secret",
+          "id": "load_key",
+          "env_var": "NVM_API_KEY",
+          "state_key": "nvm_api_key",
+          "required": true
+        },
+        {
+          "kind": "http",
+          "id": "validate_key",
+          "method": "POST",
+          "url": "https://facilitator.sandbox.nevermined.app/api/v1/api-keys/validate",
+          "headers": {"Authorization": "Bearer {nvm_api_key}"},
+          "body_json": {},
+          "description": "POST /api/v1/api-keys/validate (auth probe — confirms key is accepted)"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "validate_key",
+         "description": "pre-provisioned NVM_API_KEY accepted"}
+      ]
+    },
+    "persistence": {
+      "requires": ["nvm_api_key"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "validate_key_again",
+          "method": "POST",
+          "url": "https://facilitator.sandbox.nevermined.app/api/v1/api-keys/validate",
+          "headers": {"Authorization": "Bearer {nvm_api_key}"},
+          "body_json": {},
+          "description": "POST /api/v1/api-keys/validate (re-probe)"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "validate_key_again",
+         "description": "credential still valid"}
+      ]
+    },
+    "workflow": {
+      "requires": ["nvm_api_key"],
+      "produces": ["nvm_agent_id"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "list_agents",
+          "method": "GET",
+          "url": "https://facilitator.sandbox.nevermined.app/api/v1/protocol/agents",
+          "headers": {"Authorization": "Bearer {nvm_api_key}"},
+          "extract": {
+            "nvm_agent_id": "[0].id || [0].agentId"
+          },
+          "description": "GET /api/v1/protocol/agents (list agents owned by this key)"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "list_agents",
+         "description": "API key authorized to list agents"}
+      ]
+    }
+  }
+}

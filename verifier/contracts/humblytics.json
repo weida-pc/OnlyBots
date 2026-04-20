@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "service_slug": "humblytics",
+  "notes": "Humblytics agent-signup flow: POST /api/v1/auth/agent-initiate → {token, verifyUrl, expiresAt} then GET /api/v1/auth/agent-signup-status?token= polls until {status:'complete', authToken}. The verifyUrl requires a HUMAN to open a browser, select a paid plan ($65–$79/mo), and complete Stripe checkout — the session expires in 10 minutes. The authToken is one-time-delivered (session deleted after first 'complete' read). There is NO way for a fully autonomous agent to complete signup without human payment. This contract is marked as requiring human assistance at the payment step. The agent_task initiates and then polls; it can only succeed if a human clicks the verifyUrl during the test window. We use the agent to handle the HTTP ceremony and report the authToken once the human completes payment. Subsequent steps (add-custom-site, generate api-key) are fully autonomous.",
+  "allowed_env": [],
+  "sandbox": {
+    "url_allowlist": ["app.humblytics.com"]
+  },
+  "tests": {
+    "signup": {
+      "produces": ["humblytics_auth_token", "humblytics_property_id", "humblytics_api_key"],
+      "agent_task": {
+        "prompt": "Sign up for Humblytics autonomously. Humblytics is an A/B testing and analytics service. The agent signup flow is:\n\n1. POST https://app.humblytics.com/api/v1/auth/agent-initiate with JSON body {\"email\": \"onlybots@agentmail.to\", \"name\": \"OnlyBots\"}\n   Expected response (201 or 200): {\"token\": \"<session-token>\", \"verifyUrl\": \"https://app.humblytics.com/agent-verify?token=<session-token>\", \"expiresAt\": <unix-ms>}\n   If you get 409, the email already exists — report error 'user_exists'.\n\n2. Present the verifyUrl to the user and ask them to open it in a browser. They need to:\n   - Complete account creation\n   - Select a plan (Business Monthly $79/mo or Business Annual $65/mo)\n   - Complete Stripe payment\n   This step REQUIRES a human. The session expires in 10 minutes.\n\n3. Poll GET https://app.humblytics.com/api/v1/auth/agent-signup-status?token=<session-token> every 5 seconds, up to 120 attempts (10 minutes). Wait for {\"status\": \"complete\", \"authToken\": \"<jwt>\"}. WARNING: the authToken is delivered ONCE — the session is deleted after this response. Capture it immediately.\n\n4. Once you have the authToken, add a website: POST https://app.humblytics.com/api/v1/add-custom-site with header Authorization: Bearer <authToken> and body {\"domain\": \"onlybots.ai\", \"name\": \"OnlyBots\"}\n   Response: {\"propertyId\": \"<id>\", \"scriptId\": \"<id>\"}\n\n5. Generate an API key: POST https://app.humblytics.com/api/v2/property/<propertyId>/api-keys with header Authorization: Bearer <authToken> and body {\"name\": \"OnlyBots Production\", \"permissions\": {}}\n   Response: {\"apiKey\": \"<key>\", \"propertyId\": \"<id>\", ...}\n\nReport the authToken, propertyId, and apiKey when done.",
+        "expected_artifacts": ["humblytics_auth_token", "humblytics_property_id", "humblytics_api_key"],
+        "model": "gemini-2.5-flash",
+        "timeout_s": 720
+      },
+      "steps": [
+        {
+          "kind": "http",
+          "id": "probe_properties",
+          "method": "GET",
+          "url": "https://app.humblytics.com/api/v1/property/all",
+          "headers": {"Authorization": "Bearer {humblytics_auth_token}"},
+          "description": "Verifier probe: does the agent-reported authToken actually work?"
+        },
+        {
+          "kind": "http",
+          "id": "probe_api_key",
+          "method": "GET",
+          "url": "https://app.humblytics.com/api/external/v1/properties/{humblytics_property_id}/traffic/summary?start=2026-01-01T00:00:00Z&end=2026-04-20T23:59:59Z&timezone=UTC",
+          "headers": {"Authorization": "Bearer {humblytics_api_key}"},
+          "description": "Verifier probe: does the agent-reported apiKey work against the external analytics API?"
+        }
+      ],
+      "assertions": [
+        {"kind": "artifact_present", "artifact": "humblytics_auth_token",
+         "description": "agent received and reported the one-time authToken"},
+        {"kind": "artifact_present", "artifact": "humblytics_property_id",
+         "description": "agent created a property and reported its ID"},
+        {"kind": "artifact_present", "artifact": "humblytics_api_key",
+         "description": "agent generated and reported an API key"},
+        {"kind": "http_status_ok", "step": "probe_properties",
+         "description": "authToken is real and accepted by the API"},
+        {"kind": "http_status_ok", "step": "probe_api_key",
+         "description": "apiKey is real and accepted by the external analytics API"}
+      ]
+    },
+    "persistence": {
+      "requires": ["humblytics_auth_token", "humblytics_property_id", "humblytics_api_key"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "list_properties",
+          "method": "GET",
+          "url": "https://app.humblytics.com/api/v1/property/all",
+          "headers": {"Authorization": "Bearer {humblytics_auth_token}"},
+          "description": "GET /api/v1/property/all — authToken still valid"
+        },
+        {
+          "kind": "http",
+          "id": "analytics_check",
+          "method": "GET",
+          "url": "https://app.humblytics.com/api/external/v1/properties/{humblytics_property_id}/traffic/summary?start=2026-01-01T00:00:00Z&end=2026-04-20T23:59:59Z&timezone=UTC",
+          "headers": {"Authorization": "Bearer {humblytics_api_key}"},
+          "description": "GET analytics summary — apiKey still valid"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "list_properties",
+         "description": "authToken credential still valid"},
+        {"kind": "http_status_ok", "step": "analytics_check",
+         "description": "apiKey credential still valid"}
+      ]
+    },
+    "workflow": {
+      "requires": ["humblytics_auth_token", "humblytics_property_id", "humblytics_api_key"],
+      "produces": ["humblytics_experiment_id"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "get_recommendations",
+          "method": "GET",
+          "url": "https://app.humblytics.com/api/external/v1/properties/{humblytics_property_id}/split-test-recommendations?page=/",
+          "headers": {"Authorization": "Bearer {humblytics_api_key}"},
+          "description": "GET split-test recommendations for the homepage"
+        },
+        {
+          "kind": "http",
+          "id": "create_experiment",
+          "method": "POST",
+          "url": "https://app.humblytics.com/api/external/v1/properties/{humblytics_property_id}/split-tests",
+          "headers": {"Authorization": "Bearer {humblytics_api_key}"},
+          "body_json": {
+            "name": "OnlyBots Verifier A/B Test",
+            "page": "/",
+            "type": "nocode",
+            "goal": "click_through",
+            "auto_stop_days": 14,
+            "variants": [
+              {
+                "label": "Control",
+                "changes": []
+              },
+              {
+                "label": "Variant B",
+                "changes": [
+                  {"selector": "h1", "op": "text", "value": "OnlyBots — AI Agents Verified"}
+                ]
+              }
+            ]
+          },
+          "extract": {
+            "humblytics_experiment_id": "id || experimentId || split_test_id"
+          },
+          "description": "POST /split-tests — create a no-code A/B test"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "get_recommendations",
+         "description": "recommendations endpoint responds with apiKey"},
+        {"kind": "http_status_ok", "step": "create_experiment",
+         "description": "split test created successfully"},
+        {"kind": "artifact_present", "artifact": "humblytics_experiment_id",
+         "description": "experiment ID returned from split test creation"}
+      ]
+    }
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "service_slug": "memoryvault",
+  "notes": "POST /register (not /signup) takes {name, description} and returns api_key instantly. Auth probe is GET /me (not /api/me). Workflow: store a memory with POST /store, retrieve it with GET /get/{key}.",
+  "allowed_env": [],
+  "sandbox": {
+    "url_allowlist": ["memoryvault.link"]
+  },
+  "tests": {
+    "signup": {
+      "produces": ["memoryvault_api_key"],
+      "agent_task": {
+        "prompt": "Register a new agent on MemoryVault autonomously. MemoryVault is a persistent cloud memory service for AI agents. The signup endpoint is:\n\n  POST https://memoryvault.link/register\n  Content-Type: application/json\n  Body: {\"name\": \"<unique-agent-name>\", \"description\": \"<short description>\"}\n\nConstraints:\n  - name: alphanumeric plus underscores/hyphens ONLY. Use a short identifier like \"ob-verify-<hex6>\" where hex6 is a random 6-character hex string.\n  - description: one sentence describing the agent's purpose.\n\nThe response is JSON shaped like {\"api_key\": \"mv_...\", \"agent_id\": \"...\", \"name\": \"...\", ...}. Report the api_key.\n\nUse curl (or any HTTP client available). Execute the signup, then report the api_key.",
+        "expected_artifacts": ["memoryvault_api_key"],
+        "model": "gemini-2.5-flash",
+        "timeout_s": 120
+      },
+      "steps": [
+        {
+          "kind": "http",
+          "id": "probe_auth",
+          "method": "GET",
+          "url": "https://memoryvault.link/me",
+          "headers": {"Authorization": "Bearer {memoryvault_api_key}"},
+          "description": "Verifier probe: does the agent-reported api_key authenticate against GET /me?"
+        }
+      ],
+      "assertions": [
+        {"kind": "artifact_present", "artifact": "memoryvault_api_key",
+         "description": "agent reported an api_key"},
+        {"kind": "http_status_ok", "step": "probe_auth",
+         "description": "agent-reported api_key is real (authenticates to GET /me)"}
+      ]
+    },
+    "persistence": {
+      "requires": ["memoryvault_api_key"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "get_me",
+          "method": "GET",
+          "url": "https://memoryvault.link/me",
+          "headers": {"Authorization": "Bearer {memoryvault_api_key}"},
+          "description": "GET /me with bearer token"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "get_me",
+         "description": "credential still valid on re-auth"}
+      ]
+    },
+    "workflow": {
+      "requires": ["memoryvault_api_key"],
+      "produces": ["memoryvault_memory_key"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "store_memory",
+          "method": "POST",
+          "url": "https://memoryvault.link/store",
+          "headers": {
+            "Authorization": "Bearer {memoryvault_api_key}",
+            "Content-Type": "application/json"
+          },
+          "body_json": {
+            "key": "onlybots-verify",
+            "value": "OnlyBots verification write test",
+            "tags": ["onlybots", "verify"]
+          },
+          "extract": {
+            "memoryvault_memory_key": "key"
+          },
+          "description": "POST /store — write a memory"
+        },
+        {
+          "kind": "http",
+          "id": "retrieve_memory",
+          "method": "GET",
+          "url": "https://memoryvault.link/get/onlybots-verify",
+          "headers": {"Authorization": "Bearer {memoryvault_api_key}"},
+          "description": "GET /get/{key} — retrieve the stored memory"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "store_memory",
+         "description": "POST /store succeeded"},
+        {"kind": "artifact_present", "artifact": "memoryvault_memory_key",
+         "description": "store response returned the memory key"},
+        {"kind": "http_status_ok", "step": "retrieve_memory",
+         "description": "GET /get/{key} retrieves the stored memory"}
+      ]
+    }
+  }
+}

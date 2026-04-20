@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "service_slug": "clawtasks",
+  "notes": "Signup requires a wallet_address (Ethereum public address on Base L2) in the POST body — but NO on-chain signature at registration time. The agent generates a keypair locally (e.g. ethers.Wallet.createRandom()), sends only the public address, and receives an API key + verification_code immediately. A second step posts the verification_code to Moltbook (m/clawtasks) and calls POST /api/agents/verify to activate the account. Funding the wallet with USDC + ETH (for gas) on Base is required before posting or claiming bounties, but not before verification. The verifier skips the funding step and the workflow test uses a pre-funded wallet via CLAWTASKS_API_KEY env var. The 'placeholder address' guard on /api/agents is server-side and rejects sequential/zero addresses — use a real randomly-generated address.",
+  "allowed_env": ["CLAWTASKS_API_KEY", "CLAWTASKS_WALLET_ADDRESS"],
+  "sandbox": {
+    "url_allowlist": ["clawtasks.com", "www.clawtasks.com"]
+  },
+  "tests": {
+    "signup": {
+      "produces": ["clawtasks_api_key", "clawtasks_wallet_address", "clawtasks_verification_code"],
+      "agent_task": {
+        "prompt": "Register a new agent on ClawTasks (https://clawtasks.com).\n\nClawTasks is an agent-to-agent bounty marketplace on Base L2. Registration is HTTP-only: you supply a public wallet address (no on-chain signature needed at signup).\n\nSteps:\n\n1. Generate a random Ethereum keypair with ethers.js or a local CLI tool. Example with Node.js:\n   npm install --silent ethers 2>/dev/null && node -e \"const ethers=require('ethers'); const w=ethers.Wallet.createRandom(); console.log(w.address);\"\n   Store the private key securely. Only send the public address to the API.\n\n2. Register:\n   POST https://clawtasks.com/api/agents\n   Content-Type: application/json\n   {\"name\": \"ob-verify-<6 random hex chars>\", \"wallet_address\": \"<0x address from step 1>\"}\n\n   The response includes:\n   - api_key  (save this)\n   - verification_code  (like \"claw-XXXX\")\n\n3. Report: clawtasks_api_key, clawtasks_wallet_address, clawtasks_verification_code.\n\nDo NOT attempt Moltbook verification or wallet funding — stop after step 2.",
+        "expected_artifacts": ["clawtasks_api_key", "clawtasks_wallet_address", "clawtasks_verification_code"],
+        "model": "gemini-2.5-flash",
+        "timeout_s": 120
+      },
+      "steps": [
+        {
+          "kind": "http",
+          "id": "probe_auth",
+          "method": "GET",
+          "url": "https://clawtasks.com/api/agents/me",
+          "headers": {"Authorization": "Bearer {clawtasks_api_key}"},
+          "description": "Verifier probe: does the agent-reported api_key authenticate?"
+        }
+      ],
+      "assertions": [
+        {"kind": "artifact_present", "artifact": "clawtasks_api_key",
+         "description": "agent reported an api_key"},
+        {"kind": "artifact_present", "artifact": "clawtasks_wallet_address",
+         "description": "agent reported the wallet address used"},
+        {"kind": "artifact_present", "artifact": "clawtasks_verification_code",
+         "description": "agent received a verification_code from the register response"},
+        {"kind": "http_status_ok", "step": "probe_auth",
+         "description": "api_key authenticates to /api/agents/me"}
+      ]
+    },
+    "persistence": {
+      "requires": ["clawtasks_api_key"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "get_me",
+          "method": "GET",
+          "url": "https://clawtasks.com/api/agents/me",
+          "headers": {"Authorization": "Bearer {clawtasks_api_key}"},
+          "description": "GET /api/agents/me — checks credential is still valid"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "get_me",
+         "description": "credential still valid"}
+      ]
+    },
+    "workflow": {
+      "requires": ["clawtasks_api_key"],
+      "steps": [
+        {
+          "kind": "env_secret",
+          "id": "load_key",
+          "env_var": "CLAWTASKS_API_KEY",
+          "state_key": "clawtasks_api_key",
+          "required": true
+        },
+        {
+          "kind": "http",
+          "id": "list_bounties",
+          "method": "GET",
+          "url": "https://clawtasks.com/api/bounties?status=open",
+          "headers": {"Authorization": "Bearer {clawtasks_api_key}"},
+          "description": "GET /api/bounties?status=open — browse available work"
+        },
+        {
+          "kind": "http",
+          "id": "get_profile",
+          "method": "GET",
+          "url": "https://clawtasks.com/api/agents/me",
+          "headers": {"Authorization": "Bearer {clawtasks_api_key}"},
+          "description": "GET /api/agents/me — fetch agent profile and referral_code"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "list_bounties",
+         "description": "can list open bounties"},
+        {"kind": "http_status_ok", "step": "get_profile",
+         "description": "can fetch own profile"}
+      ]
+    }
+  }
+}
