@@ -19,7 +19,7 @@ from typing import Any
 
 from .schema import (
     Contract, TestSpec, Sandbox, AgentTask,
-    HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep,
+    HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep, PollUntilStep,
     HttpStatusOk, ArtifactPresent, ContentServesNonce,
 )
 
@@ -43,6 +43,8 @@ _STEP_KIND_ALLOWED_FIELDS: dict[str, set[str]] = {
     "inject_nonce": {"kind", "id", "state_key", "prefix", "description"},
     "env_secret": {"kind", "id", "env_var", "state_key", "required", "description"},
     "wait": {"kind", "id", "seconds", "description"},
+    "poll_until": {"kind", "id", "url", "condition", "method", "headers",
+                   "body_json", "extract", "interval_s", "max_attempts", "description"},
 }
 
 _ASSERTION_KIND_ALLOWED_FIELDS: dict[str, set[str]] = {
@@ -116,6 +118,22 @@ def _parse_step(raw: dict, ctx: str) -> Any:
         _require_keys(raw, ["seconds"], ctx)
         return WaitStep(kind="wait", id=raw["id"], seconds=float(raw["seconds"]),
                          description=raw.get("description", ""))
+    if kind == "poll_until":
+        _require_keys(raw, ["url", "condition"], ctx)
+        method = raw.get("method", "GET")
+        if method not in ("GET", "POST"):
+            raise ContractError(f"{ctx}: poll_until method must be GET or POST, got '{method}'")
+        return PollUntilStep(
+            kind="poll_until", id=raw["id"], url=raw["url"],
+            condition=raw["condition"],
+            method=method,
+            headers=raw.get("headers", {}) or {},
+            body_json=raw.get("body_json"),
+            extract=raw.get("extract", {}) or {},
+            interval_s=float(raw.get("interval_s", 5.0)),
+            max_attempts=int(raw.get("max_attempts", 12)),
+            description=raw.get("description", ""),
+        )
     raise ContractError(f"{ctx}: unreachable kind '{kind}'")
 
 

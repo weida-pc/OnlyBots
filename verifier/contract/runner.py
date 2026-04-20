@@ -33,7 +33,7 @@ import executor as _legacy
 
 from .schema import (
     Contract, TestSpec, AgentTask,
-    HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep,
+    HttpStep, PutFileStep, InjectNonceStep, EnvSecretStep, WaitStep, PollUntilStep,
     HttpStatusOk, ArtifactPresent, ContentServesNonce,
 )
 
@@ -247,6 +247,93 @@ def _run_wait(step: WaitStep) -> dict:
     }
 
 
+def _run_poll_until(step: PollUntilStep, state: dict) -> dict:
+    url = _render_string(step.url, state)
+    headers = {k: _render_string(v, state) for k, v in step.headers.items()}
+
+    t_start = time.monotonic()
+    last_status = 0
+    last_body = ""
+    attempts = 0
+
+    for attempt in range(1, step.max_attempts + 1):
+        attempts = attempt
+
+        # Make the HTTP request
+        if step.method == "GET":
+            resp = _legacy.http_get(url, headers=headers or None)
+        else:  # POST
+            body = _render_any(step.body_json, state) if step.body_json is not None else {}
+            resp = _legacy.http_post(url, body, headers=headers or None)
+
+        last_status = resp.get("status", 0)
+        last_body = resp.get("body", "")
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
+
+        # 5xx or network error → transient, retry
+        if last_status == 0 or last_status >= 500:
+            print(f"poll_until {step.id} attempt {attempt}: transient failure (status={last_status}), retrying")
+            if attempt < step.max_attempts:
+                time.sleep(step.interval_s)
+            continue
+
+        # 4xx → terminal failure
+        if 400 <= last_status < 500:
+            return {
+                "step": f"{step.id}: {step.description or f'poll_until {url}'}",
+                "step_id": step.id,
+                "status": last_status,
+                "body": last_body,
+                "elapsed_ms": elapsed_ms,
+                "error": f"poll_until got HTTP {last_status} — terminal",
+                "attempts": attempts,
+                "extracted": {},
+            }
+
+        # 2xx → check condition
+        try:
+            parsed = json.loads(last_body or "{}")
+        except Exception:
+            parsed = {}
+
+        condition_result = _extract_value(parsed, step.condition)
+        if condition_result is not None and condition_result not in (False, 0, "", [], {}):
+            # Condition met — run extract, populate state, return success
+            extracted = {}
+            for state_key, expr in step.extract.items():
+                val = _extract_value(parsed, expr)
+                if val is not None:
+                    state[state_key] = val
+                    extracted[state_key] = val
+            return {
+                "step": f"{step.id}: {step.description or f'poll_until {url}'}",
+                "step_id": step.id,
+                "status": last_status,
+                "body": last_body,
+                "elapsed_ms": int((time.monotonic() - t_start) * 1000),
+                "error": None,
+                "attempts": attempts,
+                "extracted": extracted,
+            }
+
+        # Condition not yet met → wait and retry
+        if attempt < step.max_attempts:
+            time.sleep(step.interval_s)
+
+    # Exhausted all attempts
+    elapsed_ms = int((time.monotonic() - t_start) * 1000)
+    return {
+        "step": f"{step.id}: {step.description or f'poll_until {url}'}",
+        "step_id": step.id,
+        "status": last_status,
+        "body": last_body,
+        "elapsed_ms": elapsed_ms,
+        "error": f"poll_until exhausted after {step.max_attempts} attempts",
+        "attempts": attempts,
+        "extracted": {},
+    }
+
+
 # ── URL allowlist enforcement (speed bump, NOT a sandbox) ─────────────────────
 
 def _host_matches(host: str, pattern: str) -> bool:
@@ -400,9 +487,9 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
     probe_steps = [s for s in test.steps if not isinstance(s, setup_kinds)]
 
     def _execute_one(step: Any) -> None:
-        # Sandbox URL check happens after template rendering for http/put_file.
+        # Sandbox URL check happens after template rendering for http/put_file/poll_until.
         try:
-            if isinstance(step, (HttpStep, PutFileStep)):
+            if isinstance(step, (HttpStep, PutFileStep, PollUntilStep)):
                 rendered_url = _render_string(step.url, state)
                 err = _check_url_allowed(rendered_url, allowlist)
                 if err:
@@ -431,6 +518,8 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
                 rec = _run_env_secret(step, state, contract)
             elif isinstance(step, WaitStep):
                 rec = _run_wait(step)
+            elif isinstance(step, PollUntilStep):
+                rec = _run_poll_until(step, state)
             else:
                 rec = {"step": f"{getattr(step, 'id', '?')}: unknown step kind",
                        "step_id": getattr(step, "id", "?"),

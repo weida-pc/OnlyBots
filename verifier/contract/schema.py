@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-StepKind = Literal["http", "put_file", "inject_nonce", "env_secret", "wait"]
+StepKind = Literal["http", "put_file", "inject_nonce", "env_secret", "wait", "poll_until"]
 
 
 @dataclass
@@ -106,7 +106,23 @@ class WaitStep:
     description: str = ""
 
 
-Step = HttpStep | PutFileStep | InjectNonceStep | EnvSecretStep | WaitStep
+@dataclass
+class PollUntilStep:
+    """Poll a URL until a JMESPath condition is truthy, or fail after max_attempts."""
+    kind: Literal["poll_until"]
+    id: str
+    url: str                            # templated
+    condition: str                      # JMESPath expression on parsed JSON response
+    method: Literal["GET", "POST"] = "GET"
+    headers: dict[str, str] = field(default_factory=dict)  # templated values
+    body_json: Any = None               # templated recursively
+    extract: dict[str, str] = field(default_factory=dict)  # JMESPath, run on final successful response
+    interval_s: float = 5.0
+    max_attempts: int = 12
+    description: str = ""
+
+
+Step = HttpStep | PutFileStep | InjectNonceStep | EnvSecretStep | WaitStep | PollUntilStep
 
 
 # ── Assertion kinds ───────────────────────────────────────────────────────────

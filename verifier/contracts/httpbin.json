@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "service_slug": "httpbin",
+  "notes": "Test contract for poll_until primitive validation. Not a real service verification.",
+  "allowed_env": [],
+  "sandbox": {
+    "url_allowlist": ["httpbin.org"]
+  },
+  "tests": {
+    "signup": {
+      "produces": ["httpbin_request_id"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "post_anything",
+          "method": "POST",
+          "url": "https://httpbin.org/anything",
+          "body_json": {"client": "onlybots-verifier", "action": "signup"},
+          "extract": {
+            "httpbin_request_id": "json.action"
+          },
+          "description": "POST to httpbin /anything and extract a field as a pseudo-id"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "post_anything",
+         "description": "httpbin /anything accepts POST"},
+        {"kind": "artifact_present", "artifact": "httpbin_request_id",
+         "description": "extracted action field from response"}
+      ]
+    },
+    "persistence": {
+      "requires": ["httpbin_request_id"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "get_anything",
+          "method": "GET",
+          "url": "https://httpbin.org/anything",
+          "description": "Verify httpbin GET /anything is reachable (persistence check)"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "get_anything",
+         "description": "httpbin /anything still responds on GET"}
+      ]
+    },
+    "workflow": {
+      "produces": ["httpbin_polled_method"],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "post_job",
+          "method": "POST",
+          "url": "https://httpbin.org/anything",
+          "body_json": {"client": "onlybots-verifier", "action": "submit-job"},
+          "description": "Simulate submitting a job"
+        },
+        {
+          "kind": "poll_until",
+          "id": "poll_status",
+          "url": "https://httpbin.org/anything",
+          "condition": "method",
+          "method": "GET",
+          "extract": {
+            "httpbin_polled_method": "method"
+          },
+          "interval_s": 1.0,
+          "max_attempts": 3,
+          "description": "Poll /anything until response includes a 'method' field (truthy on first try)"
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "post_job",
+         "description": "job submission accepted"},
+        {"kind": "http_status_ok", "step": "poll_status",
+         "description": "poll_until step resolved successfully"},
+        {"kind": "artifact_present", "artifact": "httpbin_polled_method",
+         "description": "poll_until extracted 'method' field from final response"}
+      ]
+    }
+  }
+}
