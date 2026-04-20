@@ -188,6 +188,114 @@ def run_agent_task(
         return result
 
 
+def _minimal_agent_env() -> dict[str, str]:
+    """Build the minimum env the gemini subprocess actually needs.
+
+    Pre-Tier-1 behavior: we passed the verifier's full os.environ to the
+    gemini subprocess. That meant a malicious service whose prompt-injected
+    the agent into running `printenv` could exfiltrate every pre-provisioned
+    API key (SIGNBEE_API_KEY, MOLTBOOK_API_KEY, BROWSER_USE_API_KEY, TWILIO_*,
+    and eventually VERIFIER_WALLET_KEY). The env_secret contract mechanism
+    scopes which state keys are exposed to the contract, but the subprocess
+    inherited the host env directly, bypassing that gate entirely.
+
+    Post-Tier-1: we pass only what gemini CLI genuinely needs — its own API
+    key, enough PATH to find curl/node, a HOME so it can read ~/.gemini
+    config, and locale settings. Everything else is dropped.
+
+    Pre-provisioned service keys are NOT passed here. Contracts that need
+    them read them via env_secret step (runs in the Python process, stores
+    in state) and pass them to the agent only as template-substituted values
+    in the prompt text. The agent still sees the value, but cannot enumerate
+    *other* services' keys via `printenv`.
+    """
+    allowed = {
+        # Needed for gemini CLI auth — the only secret the agent should see
+        # at the env level.
+        "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY", ""),
+        # Needed so gemini can find curl, node, sh, etc.
+        "PATH": os.environ.get(
+            "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ),
+        # Needed so gemini can find its config directory (~/.gemini)
+        "HOME": os.environ.get("HOME", "/tmp"),
+        # Locale — gemini may misbehave without these under some Node builds
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+        # Gemini CLI checks these to detect a tty
+        "TERM": os.environ.get("TERM", "dumb"),
+    }
+    # Drop any empty values so we don't pass `GEMINI_API_KEY=""` when unset.
+    return {k: v for k, v in allowed.items() if v}
+
+
+def _audit_log_invocation(
+    model: str, timeout_s: int, prompt_len: int, env_keys: list[str],
+    sandboxed: bool,
+) -> None:
+    """Structured log of each agent invocation. Grep target for ops.
+
+    Deliberately does NOT log prompt content or API key values — just the
+    shape of the call. Full prompt ends up in evidence/ per-run anyway.
+    """
+    print(
+        f"[agent.runtime.invoke] model={model} timeout={timeout_s}s "
+        f"prompt_chars={prompt_len} env_keys={sorted(env_keys)} "
+        f"fs_sandbox={'bwrap' if sandboxed else 'none'}"
+    )
+
+
+# bwrap presence is probed once at import time. On systems without bwrap we
+# fall back to un-sandboxed exec — better than failing closed when the
+# sandbox tool is missing, but we log it loudly so ops can notice.
+import shutil as _shutil
+_HAS_BWRAP = _shutil.which("bwrap") is not None
+
+
+def _bwrap_command(cmd: list[str]) -> list[str]:
+    """Wrap `cmd` with bwrap arguments that hide sensitive filesystem paths.
+
+    The agent subprocess inherits a read-only view of the root filesystem,
+    but `/opt/onlybots` (which contains the verifier's .env files and other
+    services' contracts) and `/home/onlybots` (which may contain config)
+    are replaced with empty tmpfs mounts. The agent can no longer read
+    credentials or prior evidence.
+
+    This is Tier 1 isolation. It does NOT protect against:
+      - Network exfiltration via URLs the agent is told to reach
+      - Prompt-injection attacks that manipulate the agent's reasoning
+      - Resource exhaustion (no CPU/memory caps yet — Tier 2)
+
+    --- bwrap flags explained ---
+      --ro-bind / /           : Root filesystem available read-only
+      --dev-bind /dev /dev    : Real /dev (gemini needs /dev/urandom, /dev/null)
+      --proc /proc            : New /proc
+      --tmpfs /tmp            : Fresh /tmp
+      --tmpfs /opt/onlybots   : Hides verifier secrets + past evidence
+      --tmpfs /home/onlybots  : Hides user config that might contain secrets
+      --die-with-parent       : Clean up if the parent dies
+      --unshare-pid           : PID namespace so agent can't see host processes
+      --unshare-ipc           : IPC namespace
+      --unshare-uts           : UTS namespace
+      --new-session           : New controlling TTY, prevents TTY hijack
+    """
+    return [
+        "bwrap",
+        "--ro-bind", "/", "/",
+        "--dev-bind", "/dev", "/dev",
+        "--proc", "/proc",
+        "--tmpfs", "/tmp",
+        "--tmpfs", "/opt/onlybots",
+        "--tmpfs", "/home/onlybots",
+        "--die-with-parent",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--new-session",
+        *cmd,
+    ]
+
+
 def _run_once(
     prompt: str,
     expected_artifacts: list[str],
@@ -196,26 +304,42 @@ def _run_once(
     cwd: str,
     reminder: bool = False,
 ) -> AgentRunResult:
-    """Single invocation of the Gemini CLI. Public runner is `run_agent_task`."""
+    """Single invocation of the Gemini CLI. Public runner is `run_agent_task`.
+
+    Tier 1 hardening applied:
+      - Env is built from allowlist only (_minimal_agent_env), NOT inherited.
+      - Every invocation is logged structurally for audit.
+      - Filesystem isolation is Tier 2 (Docker-per-test); until then the
+        agent subprocess can still read any file the onlybots user can.
+        Known gap, documented explicitly.
+    """
     full_prompt = _build_prompt(prompt, expected_artifacts, reminder=reminder)
 
-    env = dict(os.environ)
-    # Gemini CLI reads GEMINI_API_KEY from env; ensure it's there if set.
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if api_key:
-        env["GEMINI_API_KEY"] = api_key
+    # Minimal env — Tier 1.1 fix. No pre-provisioned service keys
+    # inherited, no DB URL, no Twilio credentials visible to the subprocess.
+    env = _minimal_agent_env()
 
-    # In headless mode (-p), Gemini CLI blocks tool use unless approval is
-    # pre-granted. --yolo auto-approves all tool calls. Required so the agent
-    # can actually run curl/web_fetch/etc. to complete the task.
-    # Security note: this is an agent verifier running in a dedicated VM with
-    # a scoped API key and URL allowlist enforcement downstream — the YOLO
-    # blast radius is this VM's network + filesystem. Real isolation is
-    # Phase 3 work (sandbox namespace / firewall rules).
+    # bwrap filesystem isolation — Tier 1.2. Hides /opt/onlybots and
+    # /home/onlybots from the agent subprocess so it can't read .env files
+    # or evidence from prior runs. Falls back to unwrapped exec if bwrap
+    # isn't installed (logged loudly at invoke time).
+    base_cmd = ["gemini", "-m", model, "--yolo", "-p", full_prompt]
+    if _HAS_BWRAP:
+        cmd = _bwrap_command(base_cmd)
+    else:
+        cmd = base_cmd
+        print("[agent.runtime.WARNING] bwrap not available — running agent "
+              "WITHOUT filesystem sandbox. Install bubblewrap on the host.")
+
+    _audit_log_invocation(
+        model, timeout_s, len(full_prompt), list(env.keys()),
+        sandboxed=_HAS_BWRAP,
+    )
+
     t0 = time.time()
     try:
         completed = subprocess.run(
-            ["gemini", "-m", model, "--yolo", "-p", full_prompt],
+            cmd,
             capture_output=True, text=True,
             timeout=timeout_s, env=env, cwd=cwd,
         )
