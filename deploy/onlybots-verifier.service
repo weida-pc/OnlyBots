@@ -9,7 +9,8 @@ Group=onlybots
 WorkingDirectory=/opt/onlybots/verifier
 EnvironmentFile=/opt/onlybots/.env
 EnvironmentFile=/opt/onlybots/verifier/.env
-ExecStart=/opt/onlybots/verifier/venv/bin/python main.py
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/onlybots/verifier/venv/bin/python -u main.py
 Restart=always
 RestartSec=30
 

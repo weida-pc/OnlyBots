@@ -154,7 +154,7 @@ Reference contracts (these all pass verification in production):
 --- here-now.json (multi-step publish flow with nonce verification) ---
 {example_herenow}
 
---- moltbook.json (env_secret for pre-claimed API key in workflow) ---
+--- moltbook.json (env_secret for pre-claimed API key — PERSISTENCE only, NOT signup) ---
 {example_moltbook}
 
 Now generate a contract for this service:
@@ -170,20 +170,49 @@ Core workflow:      {core_workflow}
 Docs excerpt ({docs_len} chars from {docs_url}):
 {docs_excerpt}
 
-Guidelines:
-  1. Prefer agent_task for signup if the service allows programmatic account
-     creation (no phone/CAPTCHA). Add a verifier `probe` http step afterward
-     that uses the agent-reported credential to confirm it actually works.
-  2. Use env_secret when no programmatic signup exists (API key must be
-     pre-provisioned). Add the env var to allowed_env.
-  3. Use inject_nonce + content_serves_nonce for content-publishing services
+CRITICAL SEMANTICS (violate these and the contract will be rejected by code review):
+
+  The registry's headline question is: "Can an AI agent sign up autonomously,
+  starting from zero identity?" The `signup` test MUST measure exactly that.
+  `persistence` and `workflow` measure different, lesser questions.
+
+  RULE A — `signup` test SHAPE IS FIXED:
+    - signup.agent_task MUST be present, prompting an LLM agent to attempt
+      autonomous registration.
+    - signup.steps MAY contain at most probe http steps that verify the
+      agent-returned credential. Nothing else.
+    - signup MUST NOT contain env_secret. Loading an operator-provided key
+      in signup is a LIE — it claims autonomy the agent never achieved.
+    - If the service's signup path is genuinely browser/dashboard/OAuth-only,
+      still use agent_task. The agent will correctly fail to produce the
+      credential, the assertion will fail, and the registry records "not
+      agent-first" honestly. Do NOT fall back to env_secret to make it pass.
+
+  RULE B — env_secret belongs in `persistence` / `workflow` ONLY:
+    - Use it when an operator has pre-provisioned a key for the service in
+      /opt/onlybots/verifier/.env and you want to exercise the API.
+    - Declare the env var in allowed_env.
+    - These tests report "given creds, ops work" — a separate signal from
+      signup autonomy.
+
+  RULE C — service-wide roll-up:
+    - Each test rolls up independently. The service's headline status is
+      driven by signup's pass/fail, not by the composite.
+
+OTHER GUIDELINES:
+  1. Use inject_nonce + content_serves_nonce for content-publishing services
      (the verifier generates a random nonce, the agent embeds it, the probe
      confirms it served back).
-  4. Fill sandbox.url_allowlist with EVERY host you'll contact (including
+  2. Fill sandbox.url_allowlist with EVERY host you'll contact (including
      CDN / upload hosts — check the docs excerpt).
-  5. Every test that requires state from signup must declare `requires`.
+  3. Every test that requires state from signup must declare `requires`.
      Every test that writes state must declare `produces`.
-  6. Return ONLY a JSON object inside a ```json code block. No prose before
+  4. If the service is OpenClaw / ClawHub-based (crypto wallet, skill-install
+     flow), still use agent_task in signup. The agent can do `npm install
+     ethers` and generate a keypair + sign a challenge inside the sandbox.
+     Document the wallet-signing steps plainly in the prompt. Do NOT assume
+     a Clawdis runtime; write the crypto ops inline.
+  5. Return ONLY a JSON object inside a ```json code block. No prose before
      or after. The JSON must parse as a valid Contract.
 """
 
@@ -291,17 +320,38 @@ def generate(slug: str, *, overwrite_existing: bool = False,
             )
         contract = parse_contract(raw, source=f"<generate {slug} retry>")
 
-    # Write as .draft so a human has to explicitly promote it
-    draft_path = CONTRACTS_DIR / f"{slug}.json.draft"
-    draft_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
-    print(f"[generate] Wrote draft to {draft_path}")
-    print(f"[generate] Review it, then promote: mv {draft_path} {CONTRACTS_DIR / (slug + '.json')}")
+    # Enforce the honest-signup rules programmatically (Rule A + B from the
+    # prompt). The LLM will sometimes slip these; catch it here rather than
+    # letting a dishonest contract land in the registry.
+    signup = contract.tests.get("signup")
+    if signup is None:
+        raise SystemExit("generated contract has no 'signup' test")
+    if signup.agent_task is None:
+        raise SystemExit(
+            "generated contract's signup test has no agent_task (Rule A). "
+            "Signup MUST attempt autonomous registration via agent_task, "
+            "not pre-provisioned env vars."
+        )
+    for step in signup.steps:
+        if getattr(step, "kind", None) == "env_secret":
+            raise SystemExit(
+                f"generated contract's signup test contains an env_secret step "
+                f"(id={step.id}). That's the 'dishonest signup' anti-pattern "
+                f"(Rule A). env_secret belongs in persistence/workflow only."
+            )
+
+    # Contract passed structural + honesty checks. Auto-promote on the daemon
+    # path (this function is also invoked by an operator from CLI, but that
+    # caller can still use --draft-only if they want to keep the old flow.)
+    final_path = CONTRACTS_DIR / f"{slug}.json"
+    final_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    print(f"[generate] Wrote validated contract to {final_path}")
     print(f"[generate] Contract summary:")
     for tname, spec in contract.tests.items():
         has_agent = "AGENT" if spec.agent_task else "direct"
         print(f"  {tname}: {has_agent} | {len(spec.steps)} steps, "
               f"{len(spec.assertions)} assertions | produces={spec.produces}")
-    return draft_path
+    return final_path
 
 
 def main():
