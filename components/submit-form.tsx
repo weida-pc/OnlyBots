@@ -44,32 +44,25 @@ function isValidUrl(value: string): boolean {
 }
 
 function validate(values: FormValues): FormErrors {
+  // Only `url` is actually required. Every other field is inferred from
+  // the landing page server-side (lib/metadata.ts). We keep soft
+  // validation on URL-shaped fields when the submitter does fill them
+  // in, so a typo produces a clear message.
   const errors: FormErrors = {};
 
-  if (!values.name.trim()) errors.name = "Name is required.";
   if (!values.url.trim()) {
     errors.url = "URL is required.";
   } else if (!isValidUrl(values.url)) {
     errors.url = "Must be a valid URL (https://...).";
   }
-  if (!values.signup_url.trim()) {
-    errors.signup_url = "Sign-up URL is required.";
-  } else if (!isValidUrl(values.signup_url)) {
-    errors.signup_url = "Must be a valid URL (https://...).";
-  }
-  if (!values.category) errors.category = "Category is required.";
-  if (!values.description.trim()) errors.description = "Description is required.";
-  if (!values.core_workflow.trim())
-    errors.core_workflow = "Core workflow is required.";
+  if (values.signup_url && !isValidUrl(values.signup_url))
+    errors.signup_url = "Must be a valid URL (https://...) or left blank.";
   if (values.docs_url && !isValidUrl(values.docs_url))
     errors.docs_url = "Must be a valid URL or left blank.";
   if (values.pricing_url && !isValidUrl(values.pricing_url))
     errors.pricing_url = "Must be a valid URL or left blank.";
-  if (!values.contact_email.trim()) {
-    errors.contact_email = "Contact email is required.";
-  } else if (!values.contact_email.includes("@")) {
+  if (values.contact_email && !values.contact_email.includes("@"))
     errors.contact_email = "Must be a valid email address.";
-  }
 
   return errors;
 }
@@ -105,15 +98,17 @@ export default function SubmitForm() {
 
     setLoading(true);
     try {
-      const body: Record<string, string> = {
-        name: values.name.trim(),
-        url: values.url.trim(),
-        signup_url: values.signup_url.trim(),
-        category: values.category,
-        description: values.description.trim(),
-        core_workflow: values.core_workflow.trim(),
-        contact_email: values.contact_email.trim(),
-      };
+      // Only send fields the submitter actually filled in. The server
+      // auto-fills missing ones from the landing page HTML.
+      const body: Record<string, string> = { url: values.url.trim() };
+      if (values.name.trim()) body.name = values.name.trim();
+      if (values.signup_url.trim()) body.signup_url = values.signup_url.trim();
+      if (values.category) body.category = values.category;
+      if (values.description.trim()) body.description = values.description.trim();
+      if (values.core_workflow.trim())
+        body.core_workflow = values.core_workflow.trim();
+      if (values.contact_email.trim())
+        body.contact_email = values.contact_email.trim();
       if (values.docs_url.trim()) body.docs_url = values.docs_url.trim();
       if (values.pricing_url.trim()) body.pricing_url = values.pricing_url.trim();
 

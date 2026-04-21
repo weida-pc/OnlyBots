@@ -38,7 +38,16 @@ def save_test_result(run_id: int, test_number: int, test_name: str,
                      failure_reason: str | None = None,
                      evidence_artifacts: dict | None = None,
                      details: dict | None = None):
-    """Insert a single test result row."""
+    """Upsert one test result row per (run_id, test_number).
+
+    A daemon restart mid-run used to leave the verification_run in
+    'running' state; on the next poll the run would be picked up again and
+    tests re-executed, duplicating rows in verification_results. Using
+    ON CONFLICT keeps exactly one row per (run_id, test_number) regardless
+    of how many times the test is re-run within the same run_id. Requires
+    a UNIQUE constraint on (run_id, test_number) — see ensure_schema()
+    which installs it idempotently on startup.
+    """
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -47,12 +56,55 @@ def save_test_result(run_id: int, test_number: int, test_name: str,
                     (run_id, test_number, test_name, passed, confidence,
                      failure_reason, evidence_artifacts, details)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id, test_number) DO UPDATE SET
+                    test_name = EXCLUDED.test_name,
+                    passed = EXCLUDED.passed,
+                    confidence = EXCLUDED.confidence,
+                    failure_reason = EXCLUDED.failure_reason,
+                    evidence_artifacts = EXCLUDED.evidence_artifacts,
+                    details = EXCLUDED.details
             """, (
                 run_id, test_number, test_name, passed, confidence,
                 failure_reason,
                 psycopg2.extras.Json(evidence_artifacts or {}),
                 psycopg2.extras.Json(details or {}),
             ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def ensure_schema():
+    """Install constraints/indexes the verifier relies on. Idempotent.
+
+    Safe to run on every daemon startup. Only creates if missing.
+    """
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Unique constraint for save_test_result's ON CONFLICT upsert.
+            cur.execute("""
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'verification_results_run_id_test_number_key'
+                  ) THEN
+                    -- First de-duplicate any existing dup rows, keeping the
+                    -- most recent by id. This prevents the constraint add
+                    -- from failing if the batch-run left duplicates.
+                    DELETE FROM verification_results a
+                    USING verification_results b
+                    WHERE a.id < b.id
+                      AND a.run_id = b.run_id
+                      AND a.test_number = b.test_number;
+
+                    ALTER TABLE verification_results
+                      ADD CONSTRAINT verification_results_run_id_test_number_key
+                      UNIQUE (run_id, test_number);
+                  END IF;
+                END $$;
+            """)
         conn.commit()
     finally:
         conn.close()

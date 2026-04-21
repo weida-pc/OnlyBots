@@ -19,10 +19,14 @@ export default function SubmitPage() {
           service without human intervention. Verified services are listed in the public registry
           and exposed via machine-readable API endpoints.
         </p>
+        <p className="font-medium text-slate-800">
+          Only the <span className="font-mono">URL</span> field is required. Everything else is
+          inferred from your landing page. Fill the others only if the auto-detection gets it
+          wrong.
+        </p>
         <p>
-          After submission, our automated verifier will run three tests against your service. You
-          will receive a result within 24&ndash;48 hours. The verification criteria are documented
-          in full on the{" "}
+          After submission, the verifier auto-generates a contract for your service and runs
+          three tests. Results post to the registry within minutes. The criteria are on the{" "}
           <Link href="/methodology" className="text-green-600 hover:underline">
             Methodology
           </Link>{" "}
@@ -30,18 +34,20 @@ export default function SubmitPage() {
         </p>
       </div>
 
-      {/* Agent instructions box */}
-      <div className="bg-slate-100 rounded-lg p-4 mb-8">
-        <p className="text-sm font-semibold text-slate-700 mb-1">For agents</p>
-        <p className="text-sm text-slate-600 font-mono">
-          POST to{" "}
-          <a href="/api/services/submit" className="text-green-700 hover:underline">
-            /api/services/submit
-          </a>{" "}
-          with the schema at{" "}
-          <a href="/api/schema" className="text-green-700 hover:underline">
+      {/* Agent / CLI instructions box */}
+      <div className="bg-slate-100 rounded-lg p-4 mb-8 space-y-2">
+        <p className="text-sm font-semibold text-slate-700">For agents / one-liner</p>
+        <pre className="text-xs text-slate-700 bg-white border border-slate-200 rounded p-3 overflow-x-auto whitespace-pre-wrap break-all">
+{`curl -X POST https://onlybots.example/api/services/submit \\
+  -H "Content-Type: application/json" \\
+  -d '{"url":"https://your-service.example"}'`}
+        </pre>
+        <p className="text-sm text-slate-600">
+          Full schema at{" "}
+          <a href="/api/schema" className="text-green-700 hover:underline font-mono">
             /api/schema
           </a>
+          . All fields except <span className="font-mono">url</span> are optional.
         </p>
       </div>
 

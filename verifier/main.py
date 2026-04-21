@@ -21,6 +21,7 @@ from db import (
     fetch_pending_runs, save_test_result, complete_run,
     update_service_status, retry_failed_services,
     queue_drift_check, find_drifted_services,
+    ensure_schema,
 )
 from evidence import get_evidence_dir
 from tests.test_signup import TestSignup
@@ -176,6 +177,12 @@ async def poll_once() -> int:
 
 async def poll_loop() -> None:
     print(f"[verifier] OnlyBots Verifier v{VERIFIER_VERSION}")
+    # Idempotent schema guards — specifically the unique constraint on
+    # (run_id, test_number) that save_test_result's upsert depends on.
+    try:
+        ensure_schema()
+    except Exception as e:
+        print(f"[verifier] schema check failed (will try to continue): {e}")
     print(f"[verifier] Polling every {POLL_INTERVAL_SECONDS}s...")
     while True:
         try:
