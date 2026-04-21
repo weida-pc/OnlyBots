@@ -194,6 +194,18 @@ CRITICAL SEMANTICS (violate these and the contract will be rejected by code revi
     - Declare the env var in allowed_env.
     - These tests report "given creds, ops work" — a separate signal from
       signup autonomy.
+    - Each ops test should load its OWN credential via env_secret (not
+      depend on signup.produces). This lets ops tests run even when
+      signup fails — which is the common case for Tier-3 services.
+
+  RULE D — persistence and workflow should NOT `requires` from signup.
+    - If signup is an agent_task that will fail for Tier-3 services,
+      persistence/workflow that `requires` signup.produces will crash
+      with a TemplateError. Instead, each ops test declares its own
+      env_secret step and loads the operator-provided key fresh.
+    - If no operator key exists, use env_secret with `required: false`
+      — the step no-ops, the subsequent probe gets an empty Bearer
+      header, and the test fails with a 401/403 rather than crashing.
 
   RULE C — service-wide roll-up:
     - Each test rolls up independently. The service's headline status is

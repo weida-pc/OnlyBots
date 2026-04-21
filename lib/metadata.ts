@@ -17,6 +17,10 @@ export interface InferredMetadata {
   category?: "communication" | "execution" | "hosting";
   core_workflow?: string;
   contact_email?: string;
+  // Set when the landing page looks like a domain parking / "buy this
+  // domain" shell. Submit endpoints check this and reject the URL
+  // instead of creating a junk registry entry.
+  squatter?: boolean;
 }
 
 const FETCH_TIMEOUT_MS = 10_000;
@@ -164,6 +168,23 @@ export async function inferMetadataFromUrl(url: string): Promise<InferredMetadat
   const name = title ? cleanName(title) : undefined;
   const decodedDesc = description ? decodeEntities(description).slice(0, 300) : undefined;
 
+  // Squatter / parked-domain detection. If the landing page looks like a
+  // GoDaddy-style "Buy this domain" or Dan.com marketplace shell, the URL
+  // does not point to a real service. Signal to the caller by prefixing
+  // the inferred name with a sentinel they can detect + reject.
+  const squatterSignals = [
+    /^buy\s/i,
+    /for\s+sale/i,
+    /brand\s+new\s+domain/i,
+    /^domain\s+for/i,
+    /parked\s+domain/i,
+    /purchase\s+this\s+domain/i,
+    /this\s+domain\s+is\s+for\s+sale/i,
+  ];
+  const looksLikeSquatter =
+    !!name && squatterSignals.some((re) => re.test(name)) ||
+    !!decodedDesc && squatterSignals.some((re) => re.test(decodedDesc));
+
   const docs_url = firstMatch(
     html,
     /<a\s+[^>]*href=["']([^"'#]*docs?[^"']*)["'][^>]*>/i
@@ -185,6 +206,7 @@ export async function inferMetadataFromUrl(url: string): Promise<InferredMetadat
     category: inferCategory(html),
     core_workflow: decodedDesc,
     contact_email: placeholderContactForUrl(url),
+    squatter: looksLikeSquatter,
   };
 }
 
@@ -196,7 +218,9 @@ export async function inferMetadataFromUrl(url: string): Promise<InferredMetadat
 export function fillDefaults(
   url: string,
   partial: Partial<InferredMetadata>
-): Required<Omit<InferredMetadata, "docs_url">> & { docs_url?: string } {
+): Required<Omit<InferredMetadata, "docs_url" | "squatter">> & {
+  docs_url?: string;
+} {
   const hostname = (() => {
     try {
       return new URL(url).hostname.replace(/^www\./, "");

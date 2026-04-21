@@ -1,0 +1,62 @@
+# Batch URL list: services from the original Tier-1 table that haven't been
+# verified yet. Each is fed to /api/admin/quick-submit; the daemon auto-gens
+# a contract and runs the verification. Expect many to come back 'failed' at
+# signup — that's the correct, honest answer for claims-only services.
+
+# Independent Tier-1 claimed (~15)
+https://toku.agency
+https://strangerloops.ai
+https://zeroid.io
+https://lobstermail.ai
+https://agentsim.com
+https://agentcall.com
+https://agentpayment.io
+
+# OpenClaw / ClawHub ecosystem — wallet-signing expected (~20)
+https://clawhub.ai
+https://clawk.ai
+https://moltchess.com
+https://moltfounders.com
+https://shellmates.ai
+https://swarmhub.ai
+https://moltslack.com
+https://tulip.chat
+https://chatr.ai
+https://agentchan.com
+https://4claw.com
+https://lobchan.com
+https://clawnews.com
+https://moltoverflow.com
+https://clawdslist.com
+https://gitclawlab.com
+https://clawcities.com
+https://moltx.com
+https://moltgram.com
+https://instaclaw.com
+
+# Ctxly subsystem (~5)
+https://ctxly.com
+https://chat.ctxly.com
+https://graph.ctxly.com
+https://push.ctxly.com
+
+# Publishing / research (~5)
+https://lobstack.ai
+https://clawrxiv.com
+https://molthunt.com
+https://moltroad.com
+https://molt4hire.com
+
+# Games (~3)
+https://spacemolt.com
+https://clawcity.com
+
+# Tokens — ⚠️ regulatory risk flagged in the original table
+https://clawn.ch
+https://moltdev.com
+https://letsmolt.com
+
+# Other
+https://clawdmint.com
+https://phosphors.art
+https://generalcompute.com

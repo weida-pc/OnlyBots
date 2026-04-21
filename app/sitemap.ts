@@ -4,8 +4,21 @@ import { getServices } from "@/lib/db";
 const BASE_URL =
   process.env.NEXT_PUBLIC_BASE_URL || "http://34-28-191-224.sslip.io";
 
+// Disable static generation — this route depends on runtime DB state. When
+// the DB isn't reachable at build time (local dev without Postgres, or a
+// deploy that builds the frontend on a box that can't see the production
+// DB), prerender would otherwise hard-fail the whole build.
+export const dynamic = "force-dynamic";
+
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  const services = await getServices();
+  let services: Awaited<ReturnType<typeof getServices>> = [];
+  try {
+    services = await getServices();
+  } catch {
+    // DB unreachable at sitemap generation time — emit the static entries
+    // so at least the core pages are indexable. Service pages will come
+    // back on the next regeneration tick.
+  }
 
   const serviceUrls: MetadataRoute.Sitemap = services.map((s) => ({
     url: `${BASE_URL}/services/${s.slug}`,

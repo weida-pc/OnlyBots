@@ -65,6 +65,20 @@ export async function POST(request: NextRequest) {
     !input.contact_email;
 
   const inferred = needsInference ? await inferMetadataFromUrl(input.url) : {};
+
+  if (inferred.squatter) {
+    return NextResponse.json(
+      {
+        error:
+          "Submitted URL appears to be a domain parking / 'for sale' page, " +
+          "not a live service. Refusing to add it to the registry.",
+        inferred_name: inferred.name,
+        inferred_description: inferred.description,
+      },
+      { status: 400 }
+    );
+  }
+
   const merged = fillDefaults(input.url, {
     name: input.name || inferred.name,
     description: input.description || inferred.description,

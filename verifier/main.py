@@ -89,24 +89,42 @@ async def verify_service(run: dict) -> None:
     for test in TESTS:
         print(f"  Running Test {test.test_number}: {test.test_name}...")
 
+        caught_exc: Exception | None = None
         try:
             result = await test.run(run, state, run_id)
         except Exception as e:
             traceback.print_exc()
             result = None
+            caught_exc = e
 
         if result is None:
+            # Prefer the exception's message over a generic "Unhandled
+            # exception" string so the registry actually tells us what
+            # broke. Common cases worth a clean label:
+            #   - TemplateError: signup didn't produce required state
+            #   - requests / timeout: service unreachable
+            if caught_exc is not None:
+                exc_type = type(caught_exc).__name__
+                exc_msg = str(caught_exc)[:200]
+                if "template variable" in exc_msg.lower():
+                    reason = (f"Prerequisite unmet: an earlier test was "
+                              f"supposed to produce state this test needs. "
+                              f"({exc_type}: {exc_msg})")
+                else:
+                    reason = f"{exc_type}: {exc_msg}"
+            else:
+                reason = "Unhandled exception in test (no exception captured)"
             save_test_result(
                 run_id=run_id,
                 test_number=test.test_number,
                 test_name=test.test_name,
                 passed=False,
                 confidence=0.0,
-                failure_reason="Unhandled exception in test",
+                failure_reason=reason,
             )
             if failed_at_step is None:
                 failed_at_step = test.test_number
-            print(f"  Test {test.test_number}: EXCEPTION")
+            print(f"  Test {test.test_number}: EXCEPTION — {reason}")
             continue
 
         save_test_result(
