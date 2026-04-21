@@ -72,21 +72,28 @@ def http_get(url: str, headers: dict | None = None, timeout: int = 30) -> dict:
     return _http_request("GET", url, headers=headers, timeout=timeout)
 
 
-def http_get_browser(url: str, timeout: int = 30) -> dict:
+def http_get_browser(url: str, timeout: int = 30,
+                      headers: dict | None = None) -> dict:
     """GET with a real browser TLS/JA3 fingerprint.
 
     Uses curl_cffi (libcurl with Chrome impersonation) so Cloudflare and similar
     bot-detection systems see a realistic client. Falls back to plain http_get
     if curl_cffi is not installed, so the verifier still runs in development.
+
+    Headers are forwarded so authenticated endpoints behind Cloudflare can be
+    reached with the same TLS fingerprint that passes the bot rules.
     """
     if not HAS_CURL_CFFI:
-        r = http_get(url, timeout=timeout)
+        r = http_get(url, headers=headers, timeout=timeout)
         r["via"] = "http.client (curl_cffi unavailable)"
         return r
 
     t0 = time.time()
     try:
-        resp = curl_requests.get(url, impersonate="chrome124", timeout=timeout)
+        resp = curl_requests.get(
+            url, impersonate="chrome124", timeout=timeout,
+            headers=headers or None,
+        )
         return {
             "status": resp.status_code,
             "body": resp.text,
@@ -102,6 +109,25 @@ def http_get_browser(url: str, timeout: int = 30) -> dict:
             "error": str(e),
             "via": "curl_cffi/chrome124",
         }
+
+
+def looks_like_cloudflare_block(resp: dict) -> bool:
+    """Heuristic: was this 403 a Cloudflare bot-detection page, rather
+    than a real authentication rejection? Regular 403s from an API are
+    the service telling us the credential is wrong — retrying with
+    browser TLS wouldn't help. Cloudflare's challenge / access-denied
+    pages carry distinctive markers, and those WOULD clear with a
+    realistic TLS fingerprint.
+    """
+    if resp.get("status") != 403:
+        return False
+    body = (resp.get("body") or "").lower()
+    markers = (
+        "cloudflare", "cf-ray", "attention required",
+        "checking your browser", "cf-chl-bypass", "ddos protection",
+        "security check", "ray id",
+    )
+    return any(m in body for m in markers)
 
 
 def http_get_resilient(url: str, must_contain: str = "", timeout: int = 30) -> dict:

@@ -144,6 +144,43 @@ def _step_record(step_id: str, description: str, raw: dict,
     return rec
 
 
+_CANONICAL_AUTH_PROBE_PATHS = (
+    "/api/me", "/me", "/api/v1/me", "/api/v2/me",
+    "/api/account", "/account", "/api/user", "/user",
+    "/api/whoami", "/whoami", "/api/auth/me", "/auth/me",
+    "/api/agents/me", "/api/agent", "/api/profile",
+)
+
+
+def _try_canonical_auth_probes(base_url: str, headers: dict) -> dict | None:
+    """On probe_auth 404 against a URL the LLM invented, try common
+    authenticated /me-shaped endpoints against the same origin. Returns
+    the first 2xx response dict, or None if none succeed.
+
+    Why this exists: the generator used to invent '/api/v1/me' as the
+    probe URL for every service. When the real endpoint differs (most
+    services), the 404 killed the signup test even though the agent
+    successfully produced a working credential. This fallback gives us
+    a last-chance auto-discovery.
+    """
+    try:
+        from urllib.parse import urlparse
+        parts = urlparse(base_url)
+        origin = f"{parts.scheme}://{parts.netloc}"
+    except Exception:
+        return None
+    for candidate in _CANONICAL_AUTH_PROBE_PATHS:
+        candidate_url = origin + candidate
+        if candidate_url == base_url:
+            continue  # already tried
+        r = _legacy.http_get(candidate_url, headers=headers, timeout=10)
+        status = r.get("status", 0)
+        if 200 <= status < 300:
+            r["probed_via"] = f"fallback:{candidate}"
+            return r
+    return None
+
+
 def _run_http(step: HttpStep, state: dict) -> dict:
     url = _render_string(step.url, state)
     headers = {k: _render_string(v, state) for k, v in step.headers.items()}
@@ -163,11 +200,37 @@ def _run_http(step: HttpStep, state: dict) -> dict:
         # calls are rare on content-fetch GETs. If this bites, extend the
         # resilient helper to pass headers through.
         if headers:
-            # When headers are set (e.g. Bearer auth), use plain http_get —
-            # the resilient escalation path doesn't propagate arbitrary
-            # headers to curl_cffi, and auth-gated endpoints typically
-            # don't sit behind Cloudflare bot-detection anyway.
+            # When headers are set (e.g. Bearer auth), use plain http_get
+            # first. Re-try with browser TLS ONLY on Cloudflare-shaped 403
+            # responses; a real auth 403 from an API shouldn't escalate.
             resp = _legacy.http_get(url, headers=headers)
+
+            if _legacy.looks_like_cloudflare_block(resp):
+                browser_resp = _legacy.http_get_browser(
+                    url, headers=headers, timeout=30
+                )
+                browser_resp["via"] = browser_resp.get("via") + " (cf-bypass)"
+                # Only take the browser result if it actually improved on
+                # the plain attempt — otherwise the original 403 is the
+                # truthful answer.
+                if 200 <= browser_resp.get("status", 0) < 400:
+                    resp = browser_resp
+
+            # probe_auth fallback: if an authenticated GET probe 404s and
+            # there's a credential header, the LLM probably guessed the
+            # wrong path. Try canonical /me-shaped endpoints on the same
+            # origin before declaring the signup test failed.
+            is_probe = step.id in ("probe_auth", "probe", "recheck_balance",
+                                    "get_me", "whoami", "me_check")
+            has_auth_header = any(
+                k.lower() == "authorization" or k.lower().endswith("-api-key")
+                or k.lower().endswith("-key")
+                for k in headers.keys()
+            )
+            if resp.get("status") == 404 and is_probe and has_auth_header:
+                fb = _try_canonical_auth_probes(url, headers)
+                if fb is not None:
+                    resp = fb
         else:
             resp = _legacy.http_get_resilient(url, must_contain=needle)
     elif step.method == "POST":

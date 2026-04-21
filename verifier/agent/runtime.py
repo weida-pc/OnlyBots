@@ -399,6 +399,41 @@ def _parse_agent_stdout(
         )
 
     artifacts = dict(parsed)
+
+    # Plausibility guard: agents sometimes fill a credential-shaped field
+    # with explanatory prose ("Unable to create account", "I cannot access
+    # the API", etc.) which then passes a naive emptiness check and
+    # propagates into downstream tests that crash on "Bearer Unable to...".
+    # If a value is a string that clearly reports failure, treat it as
+    # missing so the assertion layer fails the test cleanly. Only applies
+    # to *_api_key / *_token / *_jwt-shaped keys — fields that are meant
+    # to be auxiliary (probe_url, nonce) keep whatever string the agent
+    # returned.
+    _CREDENTIAL_SUFFIXES = ("_api_key", "_token", "_jwt", "_secret", "_key")
+    _FABRICATED_PATTERNS = (
+        "unable to", "cannot ", "can't ", "could not", "was unable",
+        "i do not", "i don't", "not possible", "no signup", "no public",
+        "not available", "failed to", "denied", "no programmatic",
+    )
+
+    def _looks_fabricated(value) -> bool:
+        if not isinstance(value, str):
+            return False
+        v = value.strip()
+        if len(v) < 8:
+            # Any sane token we care about is > 8 chars; shorter is a red flag.
+            return True
+        lowered = v.lower()
+        for pat in _FABRICATED_PATTERNS:
+            if pat in lowered:
+                return True
+        return False
+
+    for k in list(artifacts.keys()):
+        if any(k.endswith(suf) for suf in _CREDENTIAL_SUFFIXES):
+            if _looks_fabricated(artifacts[k]):
+                artifacts[k] = ""
+
     missing = [k for k in expected_artifacts
                if k not in artifacts or artifacts[k] in (None, "", [], {})]
     if missing:
