@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "service_slug": "e2b-the-enterprise-ai-agent-cloud",
+  "notes": "E2B (e2b.dev) sells secure sandboxed 'computers' for AI agents. Signup goes through a Supabase-backed dashboard at /auth/sign-up — email/password or GitHub OAuth, no public registration REST endpoint. An AI agent without a browser cannot click through. Expected Tier 3.\n\nContract scope: signup attempts autonomous registration via agent_task (expected to FAIL — documents the blocker honestly). Persistence + workflow probe the public API health endpoint at https://api.e2b.dev/health, which returns 'Health check successful' without auth — that gives us a 'service is alive' signal independent of signup autonomy.\n\nIf E2B ever ships a POST /api/v1/register-agent (or equivalent) with no human gate, rewrite signup to call it and this becomes Tier 1.",
+  "allowed_env": [],
+  "sandbox": {
+    "url_allowlist": ["e2b.dev", "api.e2b.dev"]
+  },
+  "tests": {
+    "signup": {
+      "produces": ["e2b_api_key"],
+      "agent_task": {
+        "prompt": "Attempt to sign up autonomously for E2B (https://e2b.dev). E2B offers sandboxed 'computers' for AI agents. Probe every public API/auth surface you can discover — the docs at https://e2b.dev/docs, /api endpoints on api.e2b.dev, /auth routes — and attempt to create an account + obtain an API key WITHOUT a browser-based dashboard step. Do NOT use any pre-provisioned env credentials. If autonomous signup is genuinely impossible (dashboard OAuth, email/password form with Supabase Auth, CAPTCHA), report that conclusion explicitly and do NOT fabricate an api_key. Never invent a credential.",
+        "expected_artifacts": ["e2b_api_key"],
+        "model": "gemini-2.5-flash",
+        "timeout_s": 90
+      },
+      "steps": [],
+      "assertions": [
+        {"kind": "artifact_present", "artifact": "e2b_api_key",
+         "description": "agent produced an E2B API key autonomously (EXPECTED TO FAIL — E2B requires a Supabase-backed dashboard signup)"}
+      ]
+    },
+    "persistence": {
+      "requires": [],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "api_health",
+          "method": "GET",
+          "url": "https://api.e2b.dev/health",
+          "description": "GET /health on api.e2b.dev — unauthenticated liveness probe. Returns 'Health check successful'."
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "api_health",
+         "description": "E2B API is reachable (service is alive)"}
+      ]
+    },
+    "workflow": {
+      "requires": [],
+      "steps": [
+        {
+          "kind": "http",
+          "id": "api_health_again",
+          "method": "GET",
+          "url": "https://api.e2b.dev/health",
+          "description": "Re-probe /health to confirm API stability. Without autonomous credentials we cannot test the core sandbox workflow (spawn/exec/terminate)."
+        }
+      ],
+      "assertions": [
+        {"kind": "http_status_ok", "step": "api_health_again",
+         "description": "API remains reachable across the run"}
+      ]
+    }
+  }
+}

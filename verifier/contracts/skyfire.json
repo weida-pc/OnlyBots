@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "service_slug": "skyfire",
-  "notes": "Skyfire has NO programmatic account creation — signup is dashboard-only via email or Google OAuth (https://app.skyfire.xyz). API keys are provisioned per agent account in the dashboard. The verifier therefore uses a pre-provisioned SKYFIRE_API_KEY from env, the same pattern used for signbee. Real API base: https://api.skyfire.xyz/api/v1. Auth header: skyfire-api-key. Confirmed working endpoints: GET /api/v1/agents/balance (401 without key, correct JSON error otherwise), POST /api/v1/tokens (same), public JWKS at https://app.skyfire.xyz/.well-known/jwks.json. The JWKS endpoint is used as the unauthenticated HTTP probe to confirm the service is live.",
+  "notes": "NOT AGENT-FIRST. Signup is dashboard-only: email magic-link (Stytch) or Google OAuth at https://app.skyfire.xyz/auth. There is no public registration endpoint. Attempting autonomous signup requires clicking the 'Login or Sign Up' submit button — a human-in-the-loop step. Any contract whose signup test 'passes' because a pre-provisioned SKYFIRE_API_KEY is in env is mislabelled: it proves the operator has a key, not that an agent obtained one.\n\nCONTRACT STRUCTURE:\n  signup test: ATTEMPTS autonomous signup via agent_task. Fails because the dashboard is the only path; the agent cannot click. This failure is the correct registry signal — 'signup is not agent-first'.\n  persistence + workflow tests: load SKYFIRE_API_KEY from env (operator-provided) and exercise operational endpoints. These are useful but they do NOT imply autonomy — they prove 'given credentials, operations work'.\n\nAPI base: https://api.skyfire.xyz/api/v1. Auth header: skyfire-api-key. Public JWKS: https://app.skyfire.xyz/.well-known/jwks.json (no auth).",
   "allowed_env": ["SKYFIRE_API_KEY"],
   "sandbox": {
     "url_allowlist": ["api.skyfire.xyz", "app.skyfire.xyz"]
@@ -9,45 +9,42 @@
   "tests": {
     "signup": {
       "produces": ["skyfire_api_key"],
+      "agent_task": {
+        "prompt": "Attempt to sign up autonomously for Skyfire (https://app.skyfire.xyz). Skyfire is an agent-payments platform. Probe every public API/auth surface you can discover — the docs, /api/v1 endpoints, /auth routes — and attempt to create an account + obtain an API key WITHOUT a browser-based dashboard step. Do not use any pre-provisioned env credentials; start from zero identity. If autonomous signup is genuinely impossible (dashboard-only magic link, OAuth, CAPTCHA, or other human-in-the-loop gate), report that conclusion explicitly and do NOT fabricate an api_key. Never invent a credential to satisfy the task.",
+        "expected_artifacts": ["skyfire_api_key"],
+        "model": "gemini-2.5-flash",
+        "timeout_s": 90
+      },
+      "steps": [],
+      "assertions": [
+        {"kind": "artifact_present", "artifact": "skyfire_api_key",
+         "description": "agent produced a Skyfire API key autonomously (EXPECTED TO FAIL — Skyfire has no agent-autonomous signup path; a dashboard click is required)"}
+      ]
+    },
+    "persistence": {
+      "requires": [],
+      "produces": ["skyfire_api_key"],
       "steps": [
         {
           "kind": "env_secret",
           "id": "load_key",
           "env_var": "SKYFIRE_API_KEY",
           "state_key": "skyfire_api_key",
-          "required": true
+          "required": true,
+          "description": "Load operator-provided SKYFIRE_API_KEY. This is NOT signup proof — it's the operator's key used to test whether credentials remain valid."
         },
-        {
-          "kind": "http",
-          "id": "probe_balance",
-          "method": "GET",
-          "url": "https://api.skyfire.xyz/api/v1/agents/balance",
-          "headers": {"skyfire-api-key": "{skyfire_api_key}"},
-          "description": "GET /api/v1/agents/balance — verifies API key is valid"
-        }
-      ],
-      "assertions": [
-        {"kind": "artifact_present", "artifact": "skyfire_api_key",
-         "description": "SKYFIRE_API_KEY env var was loaded"},
-        {"kind": "http_status_ok", "step": "probe_balance",
-         "description": "API key is accepted by Skyfire (balance endpoint returns 200)"}
-      ]
-    },
-    "persistence": {
-      "requires": ["skyfire_api_key"],
-      "steps": [
         {
           "kind": "http",
           "id": "recheck_balance",
           "method": "GET",
           "url": "https://api.skyfire.xyz/api/v1/agents/balance",
           "headers": {"skyfire-api-key": "{skyfire_api_key}"},
-          "description": "GET /api/v1/agents/balance (second call — key still valid)"
+          "description": "GET /api/v1/agents/balance with operator's key (proves credential validity, not autonomy)"
         }
       ],
       "assertions": [
         {"kind": "http_status_ok", "step": "recheck_balance",
-         "description": "credential still valid on re-auth"}
+         "description": "operator-provided credential still valid"}
       ]
     },
     "workflow": {
@@ -60,21 +57,21 @@
           "method": "GET",
           "url": "https://api.skyfire.xyz/api/v1/agents/seller-services",
           "headers": {"skyfire-api-key": "{skyfire_api_key}"},
-          "description": "GET /api/v1/agents/seller-services — list seller services for this agent"
+          "description": "GET /api/v1/agents/seller-services with operator's key"
         },
         {
           "kind": "http",
           "id": "jwks_check",
           "method": "GET",
           "url": "https://app.skyfire.xyz/.well-known/jwks.json",
-          "description": "GET /.well-known/jwks.json — public JWKS endpoint (no auth required, confirms service is live)"
+          "description": "GET /.well-known/jwks.json — public JWKS (unauth probe)"
         }
       ],
       "assertions": [
         {"kind": "http_status_ok", "step": "list_services",
-         "description": "seller-services list returns 200"},
+         "description": "seller-services list returns 200 with operator's key"},
         {"kind": "http_status_ok", "step": "jwks_check",
-         "description": "JWKS endpoint returns 200 with public key"}
+         "description": "JWKS endpoint returns 200"}
       ]
     }
   }

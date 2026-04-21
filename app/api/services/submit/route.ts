@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { checkDuplicateUrl, createService } from "@/lib/db";
 import { submitServiceSchema } from "@/lib/schema";
+import { inferMetadataFromUrl, fillDefaults } from "@/lib/metadata";
 import {
   generateVerificationToken,
   hostnameForUrl,
@@ -39,6 +40,21 @@ function checkRateLimit(ip: string): { allowed: boolean; remaining: number } {
   return { allowed: true, remaining: RATE_LIMIT_MAX - entry.count };
 }
 
+/**
+ * POST /api/services/submit
+ *
+ * Minimum payload: {"url": "https://example.com"}. Everything else is
+ * either supplied by the submitter or inferred from the landing page.
+ *
+ * Flow:
+ *   1. Rate-limit per IP (10 / 24h)
+ *   2. Parse + validate — only `url` is required
+ *   3. For missing fields, fetch the URL once and infer from HTML
+ *   4. Check duplicate URL
+ *   5. Generate a domain-verification token + create the service row
+ *   6. Return the TXT-record instructions. Verification runs after
+ *      domain ownership is proven via /api/services/:slug/verify-domain.
+ */
 export async function POST(request: NextRequest) {
   const ip = getClientIp(request);
   const { allowed, remaining } = checkRateLimit(ip);
@@ -76,9 +92,31 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const data = result.data;
+  const input = result.data;
 
-  const isDuplicate = await checkDuplicateUrl(data.url);
+  // Fill missing fields by fetching the landing page. This runs once per
+  // submission and is best-effort — any field we can't infer falls back
+  // to a hostname-derived default in fillDefaults().
+  const needsInference =
+    !input.name ||
+    !input.description ||
+    !input.signup_url ||
+    !input.category ||
+    !input.core_workflow ||
+    !input.contact_email;
+
+  const inferred = needsInference ? await inferMetadataFromUrl(input.url) : {};
+  const merged = fillDefaults(input.url, {
+    name: input.name || inferred.name,
+    description: input.description || inferred.description,
+    signup_url: input.signup_url || inferred.signup_url,
+    docs_url: input.docs_url || inferred.docs_url,
+    category: input.category || inferred.category,
+    core_workflow: input.core_workflow || inferred.core_workflow,
+    contact_email: input.contact_email || inferred.contact_email,
+  });
+
+  const isDuplicate = await checkDuplicateUrl(input.url);
   if (isDuplicate) {
     return NextResponse.json(
       { error: "A service with this URL has already been submitted." },
@@ -86,16 +124,21 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Phase 6: domain ownership verification gate. Don't queue a verification
-  // run yet — wait for the submitter to publish the TXT record and call
-  // POST /api/services/:slug/verify-domain.
+  // Phase 6 anti-spam: domain ownership gate. Run is queued by
+  // /api/services/:slug/verify-domain once the TXT record is published.
   const token = generateVerificationToken();
-  const service = await createService({ ...data, domain_verification_token: token });
+  const service = await createService({
+    ...merged,
+    url: input.url,
+    pricing_url: input.pricing_url,
+    domain_verification_token: token,
+  });
 
   const hostname = hostnameForUrl(service.url);
   return NextResponse.json(
     {
       service,
+      inferred: needsInference ? inferred : null,
       message:
         "Service submitted. Before verification runs, prove domain ownership " +
         "by publishing a TXT record and calling /api/services/:slug/verify-domain.",

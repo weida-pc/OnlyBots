@@ -55,6 +55,14 @@ async def verify_service(run: dict) -> None:
     state: dict = {}  # shared state across tests (credentials, tokens, etc.)
     failed_at_step: int | None = None
 
+    # Policy: run ALL three tests independently. Earlier failure no longer
+    # short-circuits, because a failed signup doesn't invalidate the signal
+    # that (say) persistence of an operator-provided key works, or that the
+    # public API is alive. Tests whose `requires` depend on state a failed
+    # upstream test was supposed to produce will fail themselves with a
+    # clean "prerequisite unmet" reason — that's what they're designed to
+    # do. The service's roll-up `failed_at_step` remains the FIRST failure
+    # (signup autonomy dominates), matching the registry's semantics.
     for test in TESTS:
         print(f"  Running Test {test.test_number}: {test.test_name}...")
 
@@ -73,9 +81,10 @@ async def verify_service(run: dict) -> None:
                 confidence=0.0,
                 failure_reason="Unhandled exception in test",
             )
-            failed_at_step = test.test_number
+            if failed_at_step is None:
+                failed_at_step = test.test_number
             print(f"  Test {test.test_number}: EXCEPTION")
-            break
+            continue
 
         save_test_result(
             run_id=run_id,
@@ -92,8 +101,8 @@ async def verify_service(run: dict) -> None:
             print(f"  Test {test.test_number}: PASS (confidence: {result.confidence:.0%})")
         else:
             print(f"  Test {test.test_number}: FAIL — {result.failure_reason}")
-            failed_at_step = test.test_number
-            break
+            if failed_at_step is None:
+                failed_at_step = test.test_number
 
     if failed_at_step is None:
         verified_date = datetime.now(timezone.utc).isoformat()

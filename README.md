@@ -82,13 +82,16 @@ Results are parsed for `passed`, `confidence`, `reason`, and `blocker`, then wri
 
 ### Pre-provisioned keys
 
-Some services require a one-time human setup step before the agent can operate autonomously. For these, API keys are stored in `/opt/onlybots/verifier/.env` on the VM:
+For Tier-3 services whose signup is browser-dashboard-only (Stytch, Privy, OAuth, Stripe-gated), the operator can put a key in `/opt/onlybots/verifier/.env`:
 
 ```
-MOLTBOOK_API_KEY=...   # pre-claimed Moltbook agent key
+NVM_API_KEY=sandbox:eyJ...
+SKYFIRE_API_KEY=017d...
 ```
 
-The verifier loads this key instead of registering a fresh agent, so the workflow test reflects true autonomous operation after initial setup.
+**Those keys are for `persistence` and `workflow` tests only.** They do NOT satisfy the `signup` test, and the service's roll-up status still fails at signup. This is on purpose: the registry measures signup autonomy, not whether curl works when a human hands the agent a credential.
+
+See [`docs/VERIFIER_DESIGN.md`](docs/VERIFIER_DESIGN.md) for the rationale and the anti-patterns that drove the rule.
 
 ---
 
