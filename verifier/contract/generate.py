@@ -237,14 +237,15 @@ OTHER GUIDELINES:
      a Clawdis runtime; write the crypto ops inline.
   5. PROBE_AUTH: do NOT invent a URL like "/api/v1/me" — most services
      don't have it. Instead, instruct the agent_task to ALSO report a
-     `<slug>_probe_url` artifact: the exact authenticated URL the agent
+     "<slug>_probe_url" artifact: the exact authenticated URL the agent
      used to verify its own credential (e.g. the URL that returned 200
      right after signup — typically a profile or balance endpoint). The
-     probe_auth http step then uses `{<slug>_probe_url}` as its url
-     template, not a guessed path. Declare `<slug>_probe_url` in
-     produces + expected_artifacts, and reference it in the probe_auth
-     step's url. This change fixed a batch of false-negatives where the
-     agent got a real key but the verifier's invented /me 404'd.
+     probe_auth http step then uses {{<slug>_probe_url}} as its url
+     template (double-braces because this is Python .format() text),
+     not a guessed path. Declare "<slug>_probe_url" in produces +
+     expected_artifacts, and reference it in the probe_auth step's url.
+     This change fixed a batch of false-negatives where the agent got a
+     real key but the verifier's invented /me 404'd.
   6. Return ONLY a JSON object inside a ```json code block. No prose before
      or after. The JSON must parse as a valid Contract.
 """
