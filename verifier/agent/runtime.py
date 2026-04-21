@@ -520,11 +520,17 @@ def _run_once_daytona(
             f"gemini --yolo -m {shlex.quote(model)} "
             f"-p \"$(cat /tmp/onlybots_prompt.txt)\" 2>&1"
         )
+        # Daytona's command-execution timeout is separate from the gemini
+        # CLI's internal deadline. Past batches saw runs killed at ~193s
+        # even when timeout_s was 180 — the sandbox enforces its own
+        # ceiling. Pad by 60s so gemini returns its partial output before
+        # the container kills the process.
+        sandbox_timeout = timeout_s + 60
         try:
             run_r = sandbox.process.exec(
                 run_cmd,
                 env={"GEMINI_API_KEY": gemini_key},
-                timeout=timeout_s,
+                timeout=sandbox_timeout,
             )
         except Exception as e:
             # Timeout from the SDK surfaces as an exception too
