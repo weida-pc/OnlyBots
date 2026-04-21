@@ -211,6 +211,17 @@ CRITICAL SEMANTICS (violate these and the contract will be rejected by code revi
     - Each test rolls up independently. The service's headline status is
       driven by signup's pass/fail, not by the composite.
 
+  RULE E — persistence / workflow must exercise an AUTHENTICATED endpoint.
+    - Every non-inject_nonce http step in persistence/workflow must either
+      (a) carry an Authorization / apikey / bearer header, OR
+      (b) be a post-signup probe that uses state the signup agent produced.
+    - Do NOT use unauthenticated GET of the homepage as a "persistence"
+      test. That's trivia — parked domains pass it. A real persistence
+      test exercises the credential.
+    - If there's no realistic authenticated endpoint to hit (because the
+      service genuinely has no API), make the test require signup.produces
+      so it fails cleanly rather than passing trivially.
+
 OTHER GUIDELINES:
   1. Use inject_nonce + content_serves_nonce for content-publishing services
      (the verifier generates a random nonce, the agent embeds it, the probe
@@ -350,6 +361,45 @@ def generate(slug: str, *, overwrite_existing: bool = False,
                 f"generated contract's signup test contains an env_secret step "
                 f"(id={step.id}). That's the 'dishonest signup' anti-pattern "
                 f"(Rule A). env_secret belongs in persistence/workflow only."
+            )
+
+    # Rule E — reject "homepage still responds" trivia as persistence /
+    # workflow. When the service has no real API, the LLM likes to paper
+    # over the gap by writing a persistence step that just GETs the
+    # homepage and asserts 200. That turns into an F-P-P false positive:
+    # the service has NO agent surface but the registry row looks partly
+    # green. A persistence/workflow step must exercise an AUTHENTICATED
+    # endpoint — either via env_secret + auth header, or by using state
+    # produced by signup. Unauthenticated GETs of the service's landing
+    # page don't count.
+    def _is_authenticated_step(step) -> bool:
+        headers = getattr(step, "headers", {}) or {}
+        for v in headers.values():
+            low = str(v).lower()
+            if "bearer" in low or "apikey" in low or "api-key" in low or "token" in low:
+                return True
+        return False
+    for test_name in ("persistence", "workflow"):
+        test = contract.tests.get(test_name)
+        if test is None:
+            continue
+        has_env_secret = any(
+            getattr(s, "kind", None) == "env_secret" for s in test.steps
+        )
+        http_steps = [s for s in test.steps if getattr(s, "kind", None) == "http"]
+        if not http_steps:
+            continue
+        any_authed = any(_is_authenticated_step(s) for s in http_steps)
+        # If the test has no env_secret AND no auth-header on any http
+        # step AND doesn't require signup-produced state, it's trivia.
+        if not has_env_secret and not any_authed and not test.requires:
+            raise SystemExit(
+                f"generated contract's {test_name} test is 'homepage trivia' "
+                f"(Rule E). Every http step is unauthenticated with no "
+                f"env_secret and no `requires` from signup. That produces "
+                f"FPP false positives on parked / no-API services. Use "
+                f"env_secret + Authorization header, or declare a credential "
+                f"from signup in `requires`."
             )
 
     # Contract passed structural + honesty checks. Auto-promote on the daemon
