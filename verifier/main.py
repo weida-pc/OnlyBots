@@ -79,6 +79,47 @@ async def verify_service(run: dict) -> None:
     state: dict = {}  # shared state across tests (credentials, tokens, etc.)
     failed_at_step: int | None = None
 
+    # Pre-flight connectivity check. Sparing agent+sandbox budget on dead
+    # domains is worth 10 cheap seconds here — we've seen auto-gen produce
+    # contracts for domains that time out, which then burn 5+ minutes of
+    # Gemini inside Daytona before surfacing a 'timeout' verdict we could
+    # have predicted from TCP failure alone.
+    try:
+        import http.client
+        from urllib.parse import urlparse
+        parsed = urlparse(run.get("url") or "")
+        host = parsed.netloc
+        if host:
+            t0 = time.time()
+            cls = (http.client.HTTPSConnection if parsed.scheme == "https"
+                   else http.client.HTTPConnection)
+            conn = cls(host, timeout=8)
+            try:
+                conn.request("HEAD", parsed.path or "/",
+                             headers={"User-Agent": "OnlyBotsBot/1.0 preflight"})
+                resp = conn.getresponse()
+                reach_status = resp.status
+            finally:
+                conn.close()
+            print(f"[verifier] {run['name']}: preflight {run.get('url')} -> "
+                  f"HTTP {reach_status} in {time.time()-t0:.1f}s")
+    except Exception as e:
+        print(f"[verifier] {run['name']}: preflight FAILED "
+              f"({type(e).__name__}: {e}) — service unreachable from verifier. "
+              f"Recording all 3 tests as unreachable and completing fast.")
+        reason = (f"Service URL {run.get('url')} unreachable from verifier "
+                  f"({type(e).__name__}). Likely dead domain, DNS failure, "
+                  f"or IP block.")
+        for test in TESTS:
+            save_test_result(
+                run_id=run_id, test_number=test.test_number,
+                test_name=test.test_name, passed=False, confidence=1.0,
+                failure_reason=reason,
+            )
+        update_service_status(service_id, "failed", 1, None)
+        complete_run(run_id, "failed", str(evidence_dir))
+        return
+
     # Policy: run ALL three tests independently. Earlier failure no longer
     # short-circuits, because a failed signup doesn't invalidate the signal
     # that (say) persistence of an operator-provided key works, or that the

@@ -354,9 +354,9 @@ def generate(slug: str, *, overwrite_existing: bool = False,
             )
         contract = parse_contract(raw, source=f"<generate {slug} retry>")
 
-    # Enforce the honest-signup rules programmatically (Rule A + B from the
-    # prompt). The LLM will sometimes slip these; catch it here rather than
-    # letting a dishonest contract land in the registry.
+    # Enforce the honest-signup rules programmatically (Rules A + B + 5 from
+    # the prompt). The LLM will sometimes slip these; catch it here rather
+    # than letting a dishonest or broken contract land in the registry.
     signup = contract.tests.get("signup")
     if signup is None:
         raise SystemExit("generated contract has no 'signup' test")
@@ -373,6 +373,43 @@ def generate(slug: str, *, overwrite_existing: bool = False,
                 f"(id={step.id}). That's the 'dishonest signup' anti-pattern "
                 f"(Rule A). env_secret belongs in persistence/workflow only."
             )
+
+    # Rule 5 enforcement: if a signup step references a probe_url template
+    # var, that var must be in produces AND in expected_artifacts so the
+    # agent actually fills it. Otherwise the probe step will hit a
+    # TemplateError at runtime.
+    probe_url_refs = set()
+    for step in signup.steps:
+        url_template = getattr(step, "url", "") or ""
+        # Find {token} slots that look like probe URL refs
+        import re as _re
+        for m in _re.finditer(r"\{([a-zA-Z_][a-zA-Z_0-9]*_probe_url)\}", url_template):
+            probe_url_refs.add(m.group(1))
+    for ref in probe_url_refs:
+        if ref not in signup.produces:
+            raise SystemExit(
+                f"generated contract references {{{ref}}} in a signup step "
+                f"URL but didn't declare it in signup.produces. The agent "
+                f"won't know to return it. Add '{ref}' to produces and to "
+                f"agent_task.expected_artifacts."
+            )
+        if signup.agent_task and ref not in signup.agent_task.expected_artifacts:
+            raise SystemExit(
+                f"generated contract has '{ref}' in produces but not in "
+                f"agent_task.expected_artifacts. The agent needs the key "
+                f"listed there so it knows to include it in the ARTIFACTS "
+                f"JSON block."
+            )
+
+    # If the agent_task expects a probe_url artifact, the contract should
+    # actually USE it in a probe step; otherwise it's unused and the agent
+    # wasted effort. Warn loudly (don't reject — probe step is optional).
+    if signup.agent_task:
+        for art in signup.agent_task.expected_artifacts:
+            if art.endswith("_probe_url") and art not in probe_url_refs:
+                print(f"[generate] WARNING: agent_task.expected_artifacts "
+                      f"contains '{art}' but no signup step URL template "
+                      f"references {{{art}}}. Probe step will not use it.")
 
     # Rule E — reject "homepage still responds" trivia as persistence /
     # workflow. When the service has no real API, the LLM likes to paper
