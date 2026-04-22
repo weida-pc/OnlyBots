@@ -125,18 +125,20 @@ export default function SubmitForm() {
 
       if (res.ok) {
         const data = await res.json();
-        // Server wraps the row under `service`; older clients expected it
-        // at the root. Accept either shape so a stray refactor doesn't
-        // redirect people to /services/undefined.
+        // Server gives us a status_url that already embeds the one-time
+        // submission token so the landing page can show the TXT-record
+        // instructions + Verify-domain button. Fall back to the
+        // slug-only shape for resilience against response-shape drift.
         const slug = data?.service?.slug ?? data?.slug;
-        if (!slug) {
+        const target = data?.status_url ?? (slug ? `/services/${slug}` : null);
+        if (!target) {
           setTopError(
-            "Submission succeeded but the server didn't return a slug we " +
+            "Submission succeeded but the server didn't return a URL we " +
               "can redirect to. Refresh the registry to find your entry."
           );
           return;
         }
-        router.push(`/services/${slug}`);
+        router.push(target);
         return;
       }
 

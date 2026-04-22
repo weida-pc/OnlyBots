@@ -3,14 +3,36 @@ import Link from "next/link";
 import type { Metadata } from "next";
 import { getServiceBySlug } from "@/lib/db";
 import StatusBadge from "@/components/status-badge";
+import SubmissionStatusPanel from "@/components/submission-status-panel";
 import TestResultRow from "@/components/test-result-row";
+import {
+  hostnameForUrl,
+  txtRecordName,
+  expectedTxtValue,
+} from "@/lib/domain-verification";
 import type { VerificationResult } from "@/lib/types";
 import { getServiceRequirements } from "@/lib/service-requirements";
 
 export const dynamic = "force-dynamic";
 
+// States where the service isn't done being evaluated yet. The detail
+// page renders a status panel for these instead of the empty
+// "Test Results" grid that otherwise says "Skipped (prior test failed)"
+// for every row and confuses fresh submitters.
+const NON_TERMINAL_STATUSES = new Set([
+  "pending",
+  "pending_domain_verification",
+  "running",
+  "awaiting_contract",
+]);
+
 interface PageProps {
   params: Promise<{ slug: string }>;
+  // `?token=<domain_verification_token>` — proves the viewer is the
+  // submitter and unlocks the TXT-record panel in
+  // SubmissionStatusPanel. Non-matching / missing token: public view,
+  // TXT secret stays hidden.
+  searchParams: Promise<{ token?: string }>;
 }
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
@@ -64,8 +86,9 @@ function getDuration(start: string | null | undefined, end: string | null | unde
   return `${mins}m ${remainSecs}s`;
 }
 
-export default async function ServiceDetailPage({ params }: PageProps) {
+export default async function ServiceDetailPage({ params, searchParams }: PageProps) {
   const { slug } = await params;
+  const { token } = await searchParams;
   const service = await getServiceBySlug(slug);
 
   if (!service) {
@@ -75,6 +98,38 @@ export default async function ServiceDetailPage({ params }: PageProps) {
   const run = service.verification?.run;
   const results = service.verification?.results ?? [];
   const requirements = getServiceRequirements(slug);
+
+  // Only the submitter (proven by URL-token match) sees the TXT-record
+  // instructions. Public visitors to the same page see the status but
+  // not the secret.
+  const serviceWithToken = service as typeof service & {
+    domain_verification_token?: string | null;
+  };
+  const tokenMatches = Boolean(
+    token &&
+      serviceWithToken.domain_verification_token &&
+      token === serviceWithToken.domain_verification_token
+  );
+  const hostname = (() => {
+    try {
+      return hostnameForUrl(service.url);
+    } catch {
+      return service.url;
+    }
+  })();
+  const txtRecord =
+    tokenMatches && serviceWithToken.domain_verification_token
+      ? {
+          name: txtRecordName(hostname),
+          value: expectedTxtValue(serviceWithToken.domain_verification_token),
+        }
+      : undefined;
+
+  const isNonTerminal = NON_TERMINAL_STATUSES.has(service.status);
+  // When no tests have run AND status is non-terminal, don't render
+  // the "Test Results" section — it otherwise shows three "Skipped
+  // (prior test failed)" rows for a fresh submission, which is wrong.
+  const showTestResults = results.length > 0 || !isNonTerminal;
 
   function getResult(testNumber: number): VerificationResult | null {
     return results.find((r) => r.test_number === testNumber) ?? null;
@@ -125,6 +180,21 @@ export default async function ServiceDetailPage({ params }: PageProps) {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Main content */}
         <div className="lg:col-span-2 space-y-6">
+          {/* ── Submission Status ─────────────────────────────────────────
+              Rendered while the service is still in a non-terminal
+              state. Shows the TXT-record instructions to the submitter
+              (proven by ?token=), a Verify-domain button, and auto-
+              refreshes so the page reflects the verifier's progress
+              without the submitter manually reloading. */}
+          {isNonTerminal && (
+            <SubmissionStatusPanel
+              slug={service.slug}
+              status={service.status}
+              txtRecord={txtRecord}
+              token={token}
+            />
+          )}
+
           {/* ── Verification Signature ────────────────────────────────────── */}
           {run && (
             <div className="bg-white border border-slate-200 rounded-lg p-6">
@@ -192,21 +262,23 @@ export default async function ServiceDetailPage({ params }: PageProps) {
           )}
 
           {/* ── Test Results ──────────────────────────────────────────────── */}
-          <div>
-            <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-4">
-              Test Results
-            </h2>
-            <div className="space-y-3">
-              {TEST_NAMES.map((name, i) => (
-                <TestResultRow
-                  key={i + 1}
-                  testNumber={i + 1}
-                  testName={name}
-                  result={getResult(i + 1)}
-                />
-              ))}
+          {showTestResults && (
+            <div>
+              <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-4">
+                Test Results
+              </h2>
+              <div className="space-y-3">
+                {TEST_NAMES.map((name, i) => (
+                  <TestResultRow
+                    key={i + 1}
+                    testNumber={i + 1}
+                    testName={name}
+                    result={getResult(i + 1)}
+                  />
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* ── Agent Integration Requirements ────────────────────────────── */}
           {requirements && (

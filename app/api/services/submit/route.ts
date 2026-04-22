@@ -149,13 +149,23 @@ export async function POST(request: NextRequest) {
   });
 
   const hostname = hostnameForUrl(service.url);
+  // Surface a user-facing URL where the submitter can check status,
+  // see their TXT-record instructions, and click "Verify domain"
+  // without memorizing the admin-only curl ceremony. Includes the
+  // one-time token so the page unlocks the private TXT record; public
+  // visitors hitting /services/<slug> without the token see only the
+  // redacted public state.
+  const statusUrl =
+    `/services/${service.slug}?token=${encodeURIComponent(token)}`;
   return NextResponse.json(
     {
       service,
       inferred: needsInference ? inferred : null,
+      status_url: statusUrl,
       message:
-        "Service submitted. Before verification runs, prove domain ownership " +
-        "by publishing a TXT record and calling /api/services/:slug/verify-domain.",
+        "Service submitted. Visit status_url to see your TXT-record " +
+        "instructions and track verification progress, or publish the " +
+        "record directly and POST /api/services/:slug/verify-domain.",
       domain_verification: {
         status: "pending",
         record_name: txtRecordName(hostname),
