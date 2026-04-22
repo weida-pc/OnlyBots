@@ -48,8 +48,17 @@ _TEMPLATE_RE = re.compile(r"\{\{([^{}]*)\}\}|\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 
 class TemplateError(Exception):
-    """Raised when a contract references a state variable that doesn't exist."""
-    pass
+    """Raised when a contract references a state variable that doesn't exist.
+
+    `.missing_key` is set when the cause is specifically "variable not in
+    state" (the common failure mode when an earlier test was supposed to
+    produce it). The step executor uses it to report a clean
+    'prerequisite unmet' skip instead of a noisy HTTP-0 cascade.
+    """
+
+    def __init__(self, msg: str, missing_key: str | None = None):
+        super().__init__(msg)
+        self.missing_key = missing_key
 
 
 def _render_string(s: str, state: dict) -> str:
@@ -75,8 +84,11 @@ def _render_string(s: str, state: dict) -> str:
             return "{" + escaped + "}"
         # Normal variable substitution path
         if key not in state:
-            raise TemplateError(f"template variable {{{key}}} not in state; "
-                                f"available keys: {sorted(state.keys())}")
+            raise TemplateError(
+                f"template variable {{{key}}} not in state; "
+                f"available keys: {sorted(state.keys())}",
+                missing_key=key,
+            )
         val = state[key]
         if val is None:
             raise TemplateError(f"template variable {{{key}}} is None; "
@@ -1012,10 +1024,26 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
                     return
             # receive_sms uses only DB (no outbound URL to check)
         except TemplateError as e:
+            # Missing state vars almost always mean "an earlier step that
+            # was supposed to produce this didn't". Report it as a skip
+            # with a clean prerequisite message instead of a confusing
+            # "HTTP 0 + template variable not in state" line.
+            missing = getattr(e, "missing_key", None)
+            if missing:
+                label = (f"{step.id}: skipped — prerequisite '{missing}' "
+                         f"not produced by an earlier step")
+            else:
+                label = f"{step.id}: template error"
             steps_out.append({
-                "step": f"{step.id}: template error",
+                "step": label,
                 "step_id": step.id,
-                "status": 0, "body": "", "elapsed_ms": 0, "error": str(e),
+                "status": 0, "body": "", "elapsed_ms": 0,
+                "error": str(e),
+                "skipped": True,
+                "skip_reason": (
+                    f"prerequisite '{missing}' missing from state"
+                    if missing else "template error"
+                ),
             })
             return
 
@@ -1044,8 +1072,20 @@ def run_test_steps(contract: Contract, test_name: str, state: dict) -> list[dict
                        "status": 0, "body": "", "elapsed_ms": 0,
                        "error": f"unknown step kind: {type(step).__name__}"}
         except TemplateError as e:
-            rec = {"step": f"{step.id}: template error", "step_id": step.id,
-                   "status": 0, "body": "", "elapsed_ms": 0, "error": str(e)}
+            missing = getattr(e, "missing_key", None)
+            if missing:
+                rec = {
+                    "step": (f"{step.id}: skipped — prerequisite '{missing}' "
+                              f"not produced by an earlier step"),
+                    "step_id": step.id,
+                    "status": 0, "body": "", "elapsed_ms": 0,
+                    "error": str(e),
+                    "skipped": True,
+                    "skip_reason": f"prerequisite '{missing}' missing from state",
+                }
+            else:
+                rec = {"step": f"{step.id}: template error", "step_id": step.id,
+                       "status": 0, "body": "", "elapsed_ms": 0, "error": str(e)}
         except Exception as e:
             rec = {"step": f"{step.id}: exception", "step_id": step.id,
                    "status": 0, "body": "", "elapsed_ms": 0,
@@ -1103,6 +1143,14 @@ def _eval_assertion(a: Any, steps: list[dict], state: dict) -> dict:
             return _assertion_result(False, f"step '{a.step}' not found")
         if _ok(step):
             return _assertion_result(True, f"step '{a.step}' returned HTTP {step['status']}")
+        # Skipped-due-to-prerequisite: surface the real cause, not the
+        # HTTP-0 noise. These are cascades from an upstream test that
+        # didn't produce the state this step needed — the upstream
+        # failure is what the registry should communicate.
+        if step.get("skipped"):
+            reason = step.get("skip_reason", "prerequisite unmet")
+            return _assertion_result(False,
+                f"step '{a.step}' skipped — {reason}")
         return _assertion_result(False,
             f"step '{a.step}' returned HTTP {step.get('status')} "
             f"{('(' + step['error'] + ')') if step.get('error') else ''}")
