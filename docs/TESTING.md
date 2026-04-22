@@ -107,6 +107,45 @@ what the URL describes:
 Every one of these was invisible to a server-only test pass. Only UI
 simulation surfaced them.
 
+## URL resolution before submission
+
+When adding a service whose canonical URL isn't already provided, do NOT
+append ".com" to the service name and hope. That produced 15 wrong
+entries in one batch. The correct ladder:
+
+1. **User-provided URL** — take it as-is. Still browser-verify before submit.
+2. **SERP lookup** — `python -m verifier.url_resolve "<service name>"
+   openclaw agent` (or similar hints) returns top results from Google via
+   BrightData. Requires `BRIGHTDATA_API_KEY` (available in pressclub/.env
+   or on the VM at /opt/onlybots/verifier/.env).
+3. **Verify each candidate** — navigate the top result in real Chrome
+   (not curl, not cross-origin fetch — both can falsely fail live sites).
+   Compare the rendered `<title>` and visible content against the expected
+   service. If the page is an unrelated business or a squatter, try the
+   next candidate.
+4. **Skill-registry URL is fine** — for OpenClaw-style services that live
+   as skills on clawhub.ai / agnxi.com rather than as standalone sites,
+   the skill page IS the canonical URL. Use it and note the pattern in
+   the service's `notes` field.
+5. **Only submit after the verified URL is in hand.** If no candidate
+   passes verification, do not submit — the service doesn't have a
+   registry-ready URL yet.
+
+Never skip steps 2–4. "I guessed a URL once and you caught it" is the
+exact failure pattern this ladder prevents.
+
+### Before you delete, browser-navigate
+
+When an audit flags an entry as "dead / broken", actually navigate it in
+Chrome before deleting. `curl` can return HTTP 000 for a site that's only
+reachable via real browser TLS. `fetch()` inside a cross-origin page can
+return "Failed to fetch" for live sites due to CORS. Neither is proof of
+death. Chrome navigation + reading the page body is proof.
+
+Exceptions (safe to delete without a Chrome check): DNS gaierror / NXDOMAIN
+— those are authoritative "host doesn't exist" signals, not network
+hiccups.
+
 ## Cleanup hygiene
 
 UI tests that submit forms create DB rows. Before leaving the test, delete
