@@ -68,11 +68,19 @@ async def verify_service(run: dict) -> None:
             reason = str(e) or "contract generation failed"
             print(f"[verifier] {run['name']}: auto-gen FAILED — {reason}")
             complete_run(run_id, "awaiting_contract", None)
+            # Propagate the stuck state to the service row itself. Without
+            # this update, services.status stays on whatever it was before
+            # this run started (usually 'pending'), so submitters stare at
+            # a misleading "queued" badge for hours. The run being
+            # awaiting_contract but the service being pending is the
+            # reporting drift we're fixing here.
+            update_service_status(service_id, "awaiting_contract", None, None)
             return
         except Exception as e:
             traceback.print_exc()
             print(f"[verifier] {run['name']}: auto-gen EXCEPTION — {e}")
             complete_run(run_id, "awaiting_contract", None)
+            update_service_status(service_id, "awaiting_contract", None, None)
             return
 
     evidence_dir = get_evidence_dir(run_id)
