@@ -319,45 +319,48 @@ def _call_gemini(prompt: str, model: str = "gemini-2.5-pro",
 def _enforce_honesty_rules(contract, *, signup_only: bool = False) -> None:
     """Reject generator output that violates OnlyBots' honesty rules.
 
-    Raises SystemExit with a message that's fed back into the next
-    generator retry, so the LLM gets a specific correction signal
-    rather than a generic "try again". Rules enforced:
+    Collects EVERY rule violation in the contract and raises a single
+    SystemExit with all of them enumerated. Single-violation feedback
+    made the LLM play whack-a-mole across retries (fix workflow →
+    persistence now trips → re-run → etc); the retry loop now gets the
+    full list every pass and can fix all of them at once.
 
+    Rules enforced:
       A. signup has agent_task (no env_secret cheat)
       Rule-5. signup.steps that reference {<slug>_probe_url} have that
              key in produces + agent_task.expected_artifacts
-      E. persistence / workflow prove agent-specific action: either
+      E. persistence / workflow prove agent-specific action via one of:
          env_secret + auth-header, `requires` from signup + authed
          endpoint, inject_nonce + content_serves_nonce round-trip, or
-         chained state extracted within the same test. Homepage trivia
-         rejected.
+         chained state extracted within the same test.
 
-    `signup_only=True` skips Rule E; used when we just want to check
-    the signup shape before running expensive downstream tests.
+    `signup_only=True` skips Rule E.
     """
     import re as _re
+    violations: list[str] = []
 
     signup = contract.tests.get("signup")
     if signup is None:
-        raise SystemExit("generated contract has no 'signup' test")
+        violations.append("generated contract has no 'signup' test")
+        # Can't check any other rules without a signup to look at
+        raise SystemExit("\n  - ".join(["Multiple honesty-rule violations:"]
+                                         + violations))
     if signup.agent_task is None:
-        raise SystemExit(
-            "generated contract's signup test has no agent_task (Rule A). "
-            "Signup MUST attempt autonomous registration via agent_task, "
-            "not pre-provisioned env vars."
+        violations.append(
+            "signup test has no agent_task (Rule A). Signup MUST attempt "
+            "autonomous registration via agent_task, not pre-provisioned "
+            "env vars."
         )
     for step in signup.steps:
         if getattr(step, "kind", None) == "env_secret":
-            raise SystemExit(
-                f"generated contract's signup test contains an env_secret "
-                f"step (id={step.id}). That's the 'dishonest signup' anti-"
-                f"pattern (Rule A). env_secret belongs in persistence/"
-                f"workflow only."
+            violations.append(
+                f"signup test contains an env_secret step (id={step.id}). "
+                f"That's the 'dishonest signup' anti-pattern (Rule A). "
+                f"env_secret belongs in persistence/workflow only."
             )
 
     # Rule 5: signup step URLs that reference {<slug>_probe_url} must
-    # have that var in produces AND in agent_task.expected_artifacts so
-    # the agent knows to return it.
+    # have that var in produces AND in agent_task.expected_artifacts.
     probe_url_refs = set()
     for step in signup.steps:
         url_template = getattr(step, "url", "") or ""
@@ -367,16 +370,16 @@ def _enforce_honesty_rules(contract, *, signup_only: bool = False) -> None:
             probe_url_refs.add(m.group(1))
     for ref in probe_url_refs:
         if ref not in signup.produces:
-            raise SystemExit(
-                f"generated contract references {{{ref}}} in a signup "
-                f"step URL but didn't declare it in signup.produces. The "
-                f"agent won't know to return it. Add '{ref}' to produces "
-                f"and to agent_task.expected_artifacts."
+            violations.append(
+                f"references {{{ref}}} in a signup step URL but didn't "
+                f"declare it in signup.produces. The agent won't know to "
+                f"return it. Add '{ref}' to produces and to "
+                f"agent_task.expected_artifacts."
             )
         if (signup.agent_task
                 and ref not in signup.agent_task.expected_artifacts):
-            raise SystemExit(
-                f"generated contract has '{ref}' in produces but not in "
+            violations.append(
+                f"has '{ref}' in produces but not in "
                 f"agent_task.expected_artifacts. The agent needs the key "
                 f"listed there so it knows to include it in the ARTIFACTS "
                 f"JSON block."
@@ -390,6 +393,11 @@ def _enforce_honesty_rules(contract, *, signup_only: bool = False) -> None:
                       f"references {{{art}}}. Probe step will not use it.")
 
     if signup_only:
+        if violations:
+            raise SystemExit(
+                "\n  - ".join(["Multiple honesty-rule violations:"]
+                                + violations)
+            )
         return
 
     # Rule E: persistence / workflow must prove agent-specific action.
@@ -459,22 +467,27 @@ def _enforce_honesty_rules(contract, *, signup_only: bool = False) -> None:
 
         if (not has_env_secret and not any_authed and not test.requires
                 and not nonce_roundtrip and not chained_state):
-            raise SystemExit(
-                f"generated contract's {test_name} test is 'homepage "
-                f"trivia' (Rule E). No authenticated step, no env_secret, "
-                f"no `requires` from signup, no inject_nonce + "
-                f"content_serves_nonce round-trip, and no chained state "
-                f"from within-test extracts. A parked domain would pass "
-                f"this same test, so it's not real agent-action proof. "
-                f"Rewrite the {test_name} test to do one of: "
+            violations.append(
+                f"{test_name} test is 'homepage trivia' (Rule E). No "
+                f"authenticated step, no env_secret, no `requires` from "
+                f"signup, no inject_nonce + content_serves_nonce round-"
+                f"trip, and no chained state from within-test extracts. "
+                f"A parked domain would pass this same test. Rewrite the "
+                f"{test_name} test to do ONE of: "
                 f"(a) env_secret + auth header; "
                 f"(b) require signup state + authed endpoint; "
-                f"(c) inject_nonce, embed it via the agent, then "
-                f"content_serves_nonce assertion on a GET that reads "
-                f"it back (here-now.json pattern); "
-                f"(d) chain http steps where a later step interpolates "
-                f"state extracted by an earlier step."
+                f"(c) inject_nonce in {test_name}.steps, embed the nonce "
+                f"via the agent, then content_serves_nonce assertion on "
+                f"a GET that reads it back (here-now pattern); "
+                f"(d) chain http steps within {test_name} where a later "
+                f"step's url/body interpolates a key extracted by an "
+                f"earlier step."
             )
+
+    if violations:
+        raise SystemExit(
+            "\n  - ".join(["Multiple honesty-rule violations:"] + violations)
+        )
 
 
 def generate(slug: str, *, overwrite_existing: bool = False,
