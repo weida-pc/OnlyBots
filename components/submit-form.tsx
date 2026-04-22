@@ -3,7 +3,7 @@
 import { useState, type ChangeEvent, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 
 const CATEGORIES = ["Communication", "Execution", "Hosting"] as const;
 type Category = (typeof CATEGORIES)[number];
@@ -73,6 +73,7 @@ export default function SubmitForm() {
   const [errors, setErrors] = useState<FormErrors>({});
   const [topError, setTopError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   function handleChange(
     e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
@@ -165,166 +166,194 @@ export default function SubmitForm() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-        {/* Name — optional; server falls back to landing-page <title> */}
-        <Field
-          label="Service Name"
-          name="name"
-          type="text"
-          value={values.name}
-          onChange={handleChange}
-          error={errors.name}
-          placeholder="Inferred from landing page if blank"
-        />
+      {/* Service URL — the ONLY required field. Shown by default, full width. */}
+      <Field
+        label="Service URL"
+        name="url"
+        type="url"
+        value={values.url}
+        onChange={handleChange}
+        error={errors.url}
+        placeholder="https://example.com"
+        required
+        autoFocus
+      />
 
-        {/* Category — optional; server auto-categorizes from keywords */}
-        <div className="flex flex-col gap-1.5">
-          <label
-            htmlFor="category"
-            className="text-sm font-medium text-slate-700"
-          >
-            Category
-          </label>
-          <select
-            id="category"
-            name="category"
-            value={values.category}
-            onChange={handleChange}
-            className={cn(
-              "w-full rounded-md border px-3 py-2 text-sm text-slate-900 bg-white",
-              "focus:outline-none focus:ring-2 focus:ring-green-600 focus:border-transparent",
-              "transition",
-              errors.category ? "border-red-400" : "border-slate-200"
+      {/* Advanced-fields toggle — everything below is optional and auto-
+          filled server-side from the landing page. We keep it folded by
+          default so the one-URL path is the visible default. */}
+      <div>
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          aria-expanded={showAdvanced}
+          aria-controls="advanced-fields"
+          className={cn(
+            "inline-flex items-center gap-1.5 text-sm font-medium text-slate-600",
+            "hover:text-slate-900 transition-colors"
+          )}
+        >
+          {showAdvanced ? (
+            <ChevronDown className="h-4 w-4" />
+          ) : (
+            <ChevronRight className="h-4 w-4" />
+          )}
+          {showAdvanced ? "Hide advanced fields" : "Advanced (override auto-filled fields)"}
+        </button>
+      </div>
+
+      {showAdvanced && (
+        <div id="advanced-fields" className="space-y-6">
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+            {/* Name — optional; server falls back to landing-page <title> */}
+            <Field
+              label="Service Name"
+              name="name"
+              type="text"
+              value={values.name}
+              onChange={handleChange}
+              error={errors.name}
+              placeholder="Inferred from landing page if blank"
+            />
+
+            {/* Category — optional; server auto-categorizes from keywords */}
+            <div className="flex flex-col gap-1.5">
+              <label
+                htmlFor="category"
+                className="text-sm font-medium text-slate-700"
+              >
+                Category
+              </label>
+              <select
+                id="category"
+                name="category"
+                value={values.category}
+                onChange={handleChange}
+                className={cn(
+                  "w-full rounded-md border px-3 py-2 text-sm text-slate-900 bg-white",
+                  "focus:outline-none focus:ring-2 focus:ring-green-600 focus:border-transparent",
+                  "transition",
+                  errors.category ? "border-red-400" : "border-slate-200"
+                )}
+              >
+                <option value="">Select a category</option>
+                {CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+              {errors.category && (
+                <p className="text-xs text-red-600">{errors.category}</p>
+              )}
+            </div>
+
+            {/* Sign-up URL — optional; server infers from <a href="/signup"> */}
+            <Field
+              label="Sign-up URL"
+              name="signup_url"
+              type="url"
+              value={values.signup_url}
+              onChange={handleChange}
+              error={errors.signup_url}
+              placeholder="Inferred if blank"
+            />
+
+            {/* Docs URL */}
+            <Field
+              label="Documentation URL"
+              name="docs_url"
+              type="url"
+              value={values.docs_url}
+              onChange={handleChange}
+              error={errors.docs_url}
+              placeholder="https://docs.example.com (optional)"
+            />
+
+            {/* Pricing URL */}
+            <Field
+              label="Pricing URL"
+              name="pricing_url"
+              type="url"
+              value={values.pricing_url}
+              onChange={handleChange}
+              error={errors.pricing_url}
+              placeholder="https://example.com/pricing (optional)"
+            />
+
+            {/* Contact Email */}
+            <Field
+              label="Contact Email"
+              name="contact_email"
+              type="email"
+              value={values.contact_email}
+              onChange={handleChange}
+              error={errors.contact_email}
+              placeholder="hello@<your-domain> if blank"
+              className="sm:col-span-2"
+            />
+          </div>
+
+          {/* Description — optional; server falls back to <meta description> */}
+          <div className="flex flex-col gap-1.5">
+            <label
+              htmlFor="description"
+              className="text-sm font-medium text-slate-700"
+            >
+              Description
+            </label>
+            <input
+              id="description"
+              name="description"
+              type="text"
+              value={values.description}
+              onChange={handleChange}
+              placeholder="One-sentence description of your service"
+              className={cn(
+                "w-full rounded-md border px-3 py-2 text-sm text-slate-900 placeholder-slate-400",
+                "focus:outline-none focus:ring-2 focus:ring-green-600 focus:border-transparent",
+                "transition",
+                errors.description ? "border-red-400" : "border-slate-200"
+              )}
+            />
+            {errors.description && (
+              <p className="text-xs text-red-600">{errors.description}</p>
             )}
-          >
-            <option value="">Select a category</option>
-            {CATEGORIES.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-          {errors.category && (
-            <p className="text-xs text-red-600">{errors.category}</p>
-          )}
+          </div>
+
+          {/* Core Workflow — optional; server falls back to the description */}
+          <div className="flex flex-col gap-1.5">
+            <label
+              htmlFor="core_workflow"
+              className="text-sm font-medium text-slate-700"
+            >
+              Core Workflow
+            </label>
+            <p className="text-xs text-slate-500">
+              Describe the primary task flow an AI agent would follow when using
+              your service — e.g., sign up, authenticate, perform the core
+              action, retrieve results.
+            </p>
+            <textarea
+              id="core_workflow"
+              name="core_workflow"
+              value={values.core_workflow}
+              onChange={handleChange}
+              rows={5}
+              placeholder="1. Agent creates an account via the API&#10;2. Agent authenticates with an API key&#10;3. ..."
+              className={cn(
+                "w-full rounded-md border px-3 py-2 text-sm text-slate-900 placeholder-slate-400",
+                "focus:outline-none focus:ring-2 focus:ring-green-600 focus:border-transparent",
+                "transition resize-y",
+                errors.core_workflow ? "border-red-400" : "border-slate-200"
+              )}
+            />
+            {errors.core_workflow && (
+              <p className="text-xs text-red-600">{errors.core_workflow}</p>
+            )}
+          </div>
         </div>
-
-        {/* URL */}
-        <Field
-          label="Service URL"
-          name="url"
-          type="url"
-          value={values.url}
-          onChange={handleChange}
-          error={errors.url}
-          placeholder="https://example.com"
-          required
-        />
-
-        {/* Sign-up URL — optional; server infers from <a href="/signup"> */}
-        <Field
-          label="Sign-up URL"
-          name="signup_url"
-          type="url"
-          value={values.signup_url}
-          onChange={handleChange}
-          error={errors.signup_url}
-          placeholder="Inferred if blank"
-        />
-
-        {/* Docs URL */}
-        <Field
-          label="Documentation URL"
-          name="docs_url"
-          type="url"
-          value={values.docs_url}
-          onChange={handleChange}
-          error={errors.docs_url}
-          placeholder="https://docs.example.com (optional)"
-        />
-
-        {/* Pricing URL */}
-        <Field
-          label="Pricing URL"
-          name="pricing_url"
-          type="url"
-          value={values.pricing_url}
-          onChange={handleChange}
-          error={errors.pricing_url}
-          placeholder="https://example.com/pricing (optional)"
-        />
-
-        {/* Contact Email */}
-        <Field
-          label="Contact Email"
-          name="contact_email"
-          type="email"
-          value={values.contact_email}
-          onChange={handleChange}
-          error={errors.contact_email}
-          placeholder="hello@<your-domain> if blank"
-          className="sm:col-span-2"
-        />
-      </div>
-
-      {/* Description — optional; server falls back to <meta description> */}
-      <div className="flex flex-col gap-1.5">
-        <label
-          htmlFor="description"
-          className="text-sm font-medium text-slate-700"
-        >
-          Description
-        </label>
-        <input
-          id="description"
-          name="description"
-          type="text"
-          value={values.description}
-          onChange={handleChange}
-          placeholder="One-sentence description of your service"
-          className={cn(
-            "w-full rounded-md border px-3 py-2 text-sm text-slate-900 placeholder-slate-400",
-            "focus:outline-none focus:ring-2 focus:ring-green-600 focus:border-transparent",
-            "transition",
-            errors.description ? "border-red-400" : "border-slate-200"
-          )}
-        />
-        {errors.description && (
-          <p className="text-xs text-red-600">{errors.description}</p>
-        )}
-      </div>
-
-      {/* Core Workflow — optional; server falls back to the description */}
-      <div className="flex flex-col gap-1.5">
-        <label
-          htmlFor="core_workflow"
-          className="text-sm font-medium text-slate-700"
-        >
-          Core Workflow
-        </label>
-        <p className="text-xs text-slate-500">
-          Describe the primary task flow an AI agent would follow when using
-          your service — e.g., sign up, authenticate, perform the core action,
-          retrieve results.
-        </p>
-        <textarea
-          id="core_workflow"
-          name="core_workflow"
-          value={values.core_workflow}
-          onChange={handleChange}
-          rows={5}
-          placeholder="1. Agent creates an account via the API&#10;2. Agent authenticates with an API key&#10;3. ..."
-          className={cn(
-            "w-full rounded-md border px-3 py-2 text-sm text-slate-900 placeholder-slate-400",
-            "focus:outline-none focus:ring-2 focus:ring-green-600 focus:border-transparent",
-            "transition resize-y",
-            errors.core_workflow ? "border-red-400" : "border-slate-200"
-          )}
-        />
-        {errors.core_workflow && (
-          <p className="text-xs text-red-600">{errors.core_workflow}</p>
-        )}
-      </div>
+      )}
 
       {/* Submit */}
       <div className="pt-2">
@@ -360,6 +389,7 @@ interface FieldProps {
   placeholder?: string;
   required?: boolean;
   className?: string;
+  autoFocus?: boolean;
 }
 
 function Field({
@@ -372,6 +402,7 @@ function Field({
   placeholder,
   required,
   className,
+  autoFocus,
 }: FieldProps) {
   return (
     <div className={cn("flex flex-col gap-1.5", className)}>
@@ -386,6 +417,7 @@ function Field({
         value={value}
         onChange={onChange}
         placeholder={placeholder}
+        autoFocus={autoFocus}
         className={cn(
           "w-full rounded-md border px-3 py-2 text-sm text-slate-900 placeholder-slate-400",
           "focus:outline-none focus:ring-2 focus:ring-green-600 focus:border-transparent",
