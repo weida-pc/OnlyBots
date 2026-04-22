@@ -17,7 +17,17 @@ export default function TestResultRow({
   const details = (result?.details ?? {}) as Record<string, unknown>;
 
   const harness = (details.harness as string) || null;
-  const model = (details.model as string) || null;
+  // Prefer the model the contract's agent_task actually invoked (recorded
+  // since tests/_common.py). Fall back to the legacy `model` field.
+  // `agent_task_model: null` means the test ran no LLM (pure-HTTP
+  // contract) — in that case don't render a model label at all.
+  const agentTaskModel =
+    "agent_task_model" in details
+      ? (details.agent_task_model as string | null)
+      : undefined;
+  const model =
+    agentTaskModel ??
+    (agentTaskModel === null ? null : (details.model as string) || null);
   const urlTested = (details.url_tested as string) || null;
   const responseTime = (details.response_time_s as number) || null;
   const agentReasoning = (details.agent_reasoning as string) || null;

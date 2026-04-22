@@ -135,11 +135,25 @@ export default async function ServiceDetailPage({ params, searchParams }: PagePr
     return results.find((r) => r.test_number === testNumber) ?? null;
   }
 
-  // Extract harness/model from first available test result
+  // Extract harness/model honestly — prefer the model the contract's
+  // agent_task actually invoked (recorded as `agent_task_model` per
+  // tests/_common.py). Fall back to the legacy `model` field for rows
+  // written before that change shipped. If the test has no agent_task
+  // (pure-HTTP contract), `agent_task_model` is null and we render
+  // an explicit "no LLM used" rather than a misleading default.
   const firstResult = results[0];
   const firstDetails = (firstResult?.details ?? {}) as Record<string, unknown>;
   const harness = (firstDetails.harness as string) || "unknown";
-  const model = (firstDetails.model as string) || "unknown";
+  // Find the first test that actually invoked an LLM, then report its
+  // model. If none did, model stays null and the UI hides the label.
+  const firstAgentDetails = results.find((r) => {
+    const d = (r.details ?? {}) as Record<string, unknown>;
+    return typeof d.agent_task_model === "string" && d.agent_task_model;
+  })?.details as Record<string, unknown> | undefined;
+  const model =
+    (firstAgentDetails?.agent_task_model as string) ??
+    (firstDetails.model as string) ??
+    null;
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-8">
@@ -216,11 +230,21 @@ export default async function ServiceDetailPage({ params, searchParams }: PagePr
                 </div>
                 <div>
                   <div className="text-xs font-medium text-slate-400">Test Harness</div>
-                  <div className="text-sm text-slate-700 mt-0.5 capitalize">{harness} CLI</div>
+                  <div className="text-sm text-slate-700 mt-0.5 capitalize">
+                    {harness === "unknown" ? "—" : `${harness} CLI`}
+                  </div>
                 </div>
                 <div>
                   <div className="text-xs font-medium text-slate-400">Underlying LLM</div>
-                  <div className="text-sm font-mono text-slate-700 mt-0.5">{model}</div>
+                  <div className="text-sm font-mono text-slate-700 mt-0.5">
+                    {model ? (
+                      model
+                    ) : (
+                      <span className="italic text-slate-400 font-sans">
+                        none (pure-HTTP contract)
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div>
                   <div className="text-xs font-medium text-slate-400">Run Timestamp</div>
@@ -408,31 +432,75 @@ export default async function ServiceDetailPage({ params, searchParams }: PagePr
             </div>
           )}
 
-          {/* ── Reproduce This Verification ───────────────────────────────── */}
+          {/* ── Reproduce This Verification ───────────────────────────────────
+              Honest reproducer — points at the ACTUAL contract file the
+              verifier executed and the command that re-runs it.
+              Previous version rendered made-up `npm install -g openclaw`
+              lines (no such package) and a handwritten "Visit X and
+              determine..." prompt that has nothing to do with how the
+              verifier actually works (contract-driven, not single-prompt).
+              See docs/VERIFIER_DESIGN.md for the contract architecture. */}
           {run && (
             <div className="bg-slate-900 text-slate-100 rounded-lg p-6">
               <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wide mb-3">
                 Reproduce This Verification
               </h2>
               <p className="text-xs text-slate-400 mb-3">
-                Run the same test with the same harness and model to reproduce these results.
+                The executable definition is{" "}
+                <a
+                  href={`https://github.com/weida-pc/OnlyBots/blob/main/verifier/contracts/${service.slug}.json`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-green-400 hover:underline font-mono"
+                >
+                  verifier/contracts/{service.slug}.json
+                </a>
+                . Each test runs the contract&apos;s steps + assertions; the
+                inner <code className="text-green-400">agent_task</code> prompt
+                (when present) is executed inside a fresh Daytona sandbox via
+                the Gemini CLI. Clone the repo, install the Python venv, set
+                your Gemini API key, and run:
               </p>
               <div className="bg-slate-800 rounded-md p-3 font-mono text-xs leading-relaxed overflow-x-auto">
-                <div className="text-slate-500"># Install the agent CLI</div>
+                <div className="text-slate-500"># Clone + install</div>
                 <div className="text-green-400">
-                  npm install -g {harness === "gemini" ? "@google/gemini-cli" : harness === "claude" ? "@anthropic-ai/claude-code" : harness === "codex" ? "@openai/codex" : harness === "openclaw" ? "openclaw" : harness}
+                  git clone https://github.com/weida-pc/OnlyBots &amp;&amp; cd OnlyBots/verifier
                 </div>
-                <div className="text-slate-500 mt-2"># Set your API key</div>
                 <div className="text-green-400">
-                  export {harness === "gemini" || harness === "openclaw" ? "GEMINI_API_KEY" : harness === "claude" ? "ANTHROPIC_API_KEY" : harness === "codex" ? "OPENAI_API_KEY" : "API_KEY"}=your_key_here
+                  python -m venv venv &amp;&amp; source venv/bin/activate &amp;&amp; pip install -r requirements.txt
                 </div>
-                <div className="text-slate-500 mt-2"># Run verification (Test 1 example)</div>
+                <div className="text-slate-500 mt-2">
+                  # Daytona for the sandboxed agent_task + Gemini for the LLM calls
+                </div>
                 <div className="text-green-400">
-                  {harness === "gemini" ? `gemini -m ${model} -p` : harness === "claude" ? `claude --model ${model} --print` : harness === "openclaw" ? `openclaw --provider ${model} -p` : `${harness} --model ${model} --print`} &quot;Visit {service.signup_url} and determine if an AI agent can autonomously sign up...&quot;
+                  export DAYTONA_API_KEY=your_daytona_key
+                </div>
+                <div className="text-green-400">
+                  export GEMINI_API_KEY=your_gemini_key
+                </div>
+                <div className="text-slate-500 mt-2">
+                  # Run the three tests against this exact contract
+                </div>
+                <div className="text-green-400">
+                  python -c &quot;from executor import execute_signup, execute_persist, execute_workflow; state={'{}'}; import json; [print(t, json.dumps(f(&apos;{service.slug}&apos;, state), indent=2)) for t, f in [(&apos;signup&apos;, execute_signup), (&apos;persist&apos;, execute_persist), (&apos;workflow&apos;, execute_workflow)]]&quot;
                 </div>
               </div>
               <div className="mt-3 text-xs text-slate-500">
-                Verifier v{run.verifier_version} &middot; {harness}/{model} &middot; {formatTimestamp(run.started_at)}
+                Verifier v{run.verifier_version} &middot;{" "}
+                <a
+                  href={`https://github.com/weida-pc/OnlyBots/blob/main/verifier/contracts/${service.slug}.json`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:underline"
+                >
+                  contract
+                </a>{" "}
+                &middot; ran at {formatTimestamp(run.started_at)}
+                {run.completed_at && (
+                  <>
+                    , took {getDuration(run.started_at, run.completed_at)}
+                  </>
+                )}
               </div>
             </div>
           )}

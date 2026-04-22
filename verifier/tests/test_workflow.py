@@ -9,6 +9,7 @@ from executor import execute_workflow, format_steps, verdict_workflow
 from harness import get_harness_for_service
 from evidence import save_log
 from tests.base import BaseTest, TestResult
+from tests._common import details_for
 
 
 class TestWorkflow(BaseTest):
@@ -38,6 +39,17 @@ class TestWorkflow(BaseTest):
         reason = verdict["reason"]
         blocker = verdict.get("blocker")
 
+        base_details = details_for(
+            slug=slug,
+            test_name="workflow",
+            harness_name=harness_name,
+            fallback_model=model,
+            steps=steps,
+            url_tested=docs_url or url,
+            reason=reason,
+            blocker=blocker,
+        )
+        base_details["core_workflow"] = core_workflow
         return TestResult(
             passed=passed,
             confidence=confidence,
@@ -45,16 +57,5 @@ class TestWorkflow(BaseTest):
             evidence_artifacts={
                 "http_raw": f"{run_id}/t3_workflow_http_raw.log",
             },
-            details={
-                "harness": harness_name,
-                "model": model,
-                "method": "direct_http",
-                "url_tested": docs_url or url,
-                "response_time_s": sum(s.get("elapsed_ms", 0) for s in steps) / 1000,
-                "core_workflow": core_workflow,
-                "agent_reasoning": reason,
-                "blocker_type": blocker,
-                "http_steps": len(steps),
-                "http_statuses": [s.get("status") for s in steps],
-            },
+            details=base_details,
         )
