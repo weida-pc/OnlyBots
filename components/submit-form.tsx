@@ -111,6 +111,10 @@ export default function SubmitForm() {
         body.contact_email = values.contact_email.trim();
       if (values.docs_url.trim()) body.docs_url = values.docs_url.trim();
       if (values.pricing_url.trim()) body.pricing_url = values.pricing_url.trim();
+      // Server's zod schema expects lowercase category
+      // (communication/execution/hosting). The dropdown labels are
+      // title-cased for display. Downcase on the wire.
+      if (body.category) body.category = body.category.toLowerCase();
 
       const res = await fetch("/api/services/submit", {
         method: "POST",
@@ -120,7 +124,18 @@ export default function SubmitForm() {
 
       if (res.ok) {
         const data = await res.json();
-        router.push(`/services/${data.slug}`);
+        // Server wraps the row under `service`; older clients expected it
+        // at the root. Accept either shape so a stray refactor doesn't
+        // redirect people to /services/undefined.
+        const slug = data?.service?.slug ?? data?.slug;
+        if (!slug) {
+          setTopError(
+            "Submission succeeded but the server didn't return a slug we " +
+              "can redirect to. Refresh the registry to find your entry."
+          );
+          return;
+        }
+        router.push(`/services/${slug}`);
         return;
       }
 
@@ -151,7 +166,7 @@ export default function SubmitForm() {
       )}
 
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-        {/* Name */}
+        {/* Name — optional; server falls back to landing-page <title> */}
         <Field
           label="Service Name"
           name="name"
@@ -159,17 +174,16 @@ export default function SubmitForm() {
           value={values.name}
           onChange={handleChange}
           error={errors.name}
-          placeholder="Acme AI Agent"
-          required
+          placeholder="Inferred from landing page if blank"
         />
 
-        {/* Category */}
+        {/* Category — optional; server auto-categorizes from keywords */}
         <div className="flex flex-col gap-1.5">
           <label
             htmlFor="category"
             className="text-sm font-medium text-slate-700"
           >
-            Category <span className="text-red-500">*</span>
+            Category
           </label>
           <select
             id="category"
@@ -207,7 +221,7 @@ export default function SubmitForm() {
           required
         />
 
-        {/* Sign-up URL */}
+        {/* Sign-up URL — optional; server infers from <a href="/signup"> */}
         <Field
           label="Sign-up URL"
           name="signup_url"
@@ -215,8 +229,7 @@ export default function SubmitForm() {
           value={values.signup_url}
           onChange={handleChange}
           error={errors.signup_url}
-          placeholder="https://example.com/signup"
-          required
+          placeholder="Inferred if blank"
         />
 
         {/* Docs URL */}
@@ -249,19 +262,18 @@ export default function SubmitForm() {
           value={values.contact_email}
           onChange={handleChange}
           error={errors.contact_email}
-          placeholder="you@example.com"
-          required
+          placeholder="hello@<your-domain> if blank"
           className="sm:col-span-2"
         />
       </div>
 
-      {/* Description */}
+      {/* Description — optional; server falls back to <meta description> */}
       <div className="flex flex-col gap-1.5">
         <label
           htmlFor="description"
           className="text-sm font-medium text-slate-700"
         >
-          Description <span className="text-red-500">*</span>
+          Description
         </label>
         <input
           id="description"
@@ -282,13 +294,13 @@ export default function SubmitForm() {
         )}
       </div>
 
-      {/* Core Workflow */}
+      {/* Core Workflow — optional; server falls back to the description */}
       <div className="flex flex-col gap-1.5">
         <label
           htmlFor="core_workflow"
           className="text-sm font-medium text-slate-700"
         >
-          Core Workflow <span className="text-red-500">*</span>
+          Core Workflow
         </label>
         <p className="text-xs text-slate-500">
           Describe the primary task flow an AI agent would follow when using

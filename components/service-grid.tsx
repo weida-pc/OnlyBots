@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import type { Service } from "@/lib/types";
 import ServiceCard from "@/components/service-card";
 import { cn } from "@/lib/utils";
@@ -9,14 +10,29 @@ import { Search } from "lucide-react";
 const CATEGORIES = ["All", "Communication", "Execution", "Hosting"] as const;
 type Category = (typeof CATEGORIES)[number];
 
+function categoryFromQuery(raw: string | null): Category {
+  // Accept either case so an agent that bookmarks ?category=execution
+  // or a human with ?category=Execution both land correctly. Anything
+  // unrecognized falls back to All.
+  if (!raw) return "All";
+  const lower = raw.toLowerCase();
+  if (lower === "communication") return "Communication";
+  if (lower === "execution") return "Execution";
+  if (lower === "hosting") return "Hosting";
+  return "All";
+}
+
 interface ServiceGridProps {
   initialServices: Service[];
 }
 
 export default function ServiceGrid({ initialServices }: ServiceGridProps) {
+  const searchParams = useSearchParams();
   const [services, setServices] = useState<Service[]>(initialServices);
-  const [query, setQuery] = useState("");
-  const [category, setCategory] = useState<Category>("All");
+  const [query, setQuery] = useState<string>(searchParams.get("q") ?? "");
+  const [category, setCategory] = useState<Category>(() =>
+    categoryFromQuery(searchParams.get("category"))
+  );
   const [loading, setLoading] = useState(false);
 
   const fetchServices = useCallback(async (q: string, cat: Category) => {
@@ -24,7 +40,11 @@ export default function ServiceGrid({ initialServices }: ServiceGridProps) {
     try {
       const params = new URLSearchParams();
       if (q.trim()) params.set("q", q.trim());
-      if (cat !== "All") params.set("category", cat);
+      // DB + submission schema store category lowercase
+      // (communication/execution/hosting). The button labels here are
+      // title-cased for display. Must downcase before sending or the
+      // exact-match filter on the server returns zero rows.
+      if (cat !== "All") params.set("category", cat.toLowerCase());
 
       const res = await fetch(`/api/services?${params.toString()}`);
       if (!res.ok) throw new Error("Fetch failed");
