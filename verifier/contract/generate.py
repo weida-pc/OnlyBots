@@ -151,7 +151,12 @@ Reference contracts (these all pass verification in production):
 --- agentmail-to.json (programmatic API signup, agent-driven) ---
 {example_agentmail}
 
---- here-now.json (multi-step publish flow with nonce verification) ---
+--- here-now.json (ANONYMOUS service with NO accounts — uses inject_nonce +
+    content_serves_nonce for round-trip proof. This is the pattern for any
+    service whose primary flow is "agent publishes/posts content; verifier
+    reads it back". No auth header ever. No env_secret ever. Autonomy
+    proven by the fact that the verifier sees its own injected nonce come
+    back through the service.) ---
 {example_herenow}
 
 --- moltbook.json (env_secret for pre-claimed API key — PERSISTENCE only, NOT signup) ---
@@ -311,52 +316,27 @@ def _call_gemini(prompt: str, model: str = "gemini-2.5-pro",
     return completed.stdout
 
 
-def generate(slug: str, *, overwrite_existing: bool = False,
-              model: str = "gemini-2.5-pro") -> Path:
-    if has_contract(slug) and not overwrite_existing:
-        raise SystemExit(
-            f"contract for '{slug}' already exists at "
-            f"{CONTRACTS_DIR / (slug + '.json')}. Pass --overwrite to replace.")
+def _enforce_honesty_rules(contract, *, signup_only: bool = False) -> None:
+    """Reject generator output that violates OnlyBots' honesty rules.
 
-    service = _load_service(slug)
-    docs_excerpt = _fetch_docs(service.get("docs_url"))
-    prompt = _build_prompt(service, docs_excerpt)
+    Raises SystemExit with a message that's fed back into the next
+    generator retry, so the LLM gets a specific correction signal
+    rather than a generic "try again". Rules enforced:
 
-    print(f"[generate] Calling {model} for {slug} (prompt={len(prompt)} chars)...")
-    output = _call_gemini(prompt, model=model)
+      A. signup has agent_task (no env_secret cheat)
+      Rule-5. signup.steps that reference {<slug>_probe_url} have that
+             key in produces + agent_task.expected_artifacts
+      E. persistence / workflow prove agent-specific action: either
+         env_secret + auth-header, `requires` from signup + authed
+         endpoint, inject_nonce + content_serves_nonce round-trip, or
+         chained state extracted within the same test. Homepage trivia
+         rejected.
 
-    # Attempt 1: parse + validate
-    raw = _extract_json(output)
-    if raw is None:
-        raise SystemExit(
-            "LLM output did not contain a parseable ```json``` block.\n"
-            f"Last 1KB of output:\n{output[-1024:]}"
-        )
+    `signup_only=True` skips Rule E; used when we just want to check
+    the signup shape before running expensive downstream tests.
+    """
+    import re as _re
 
-    try:
-        contract = parse_contract(raw, source=f"<generate {slug}>")
-    except ContractError as e:
-        # Retry once with error feedback
-        print(f"[generate] First draft failed validation: {e}")
-        print(f"[generate] Retrying with error in feedback prompt...")
-        retry_prompt = (
-            f"{prompt}\n\n"
-            f"YOUR PREVIOUS RESPONSE FAILED VALIDATION WITH THIS ERROR:\n"
-            f"  {e}\n\n"
-            f"Produce a CORRECTED JSON contract that fixes the specific problem above."
-        )
-        output = _call_gemini(retry_prompt, model=model)
-        raw = _extract_json(output)
-        if raw is None:
-            raise SystemExit(
-                "Retry also produced no parseable JSON. Raw last 1KB:\n"
-                f"{output[-1024:]}"
-            )
-        contract = parse_contract(raw, source=f"<generate {slug} retry>")
-
-    # Enforce the honest-signup rules programmatically (Rules A + B + 5 from
-    # the prompt). The LLM will sometimes slip these; catch it here rather
-    # than letting a dishonest or broken contract land in the registry.
     signup = contract.tests.get("signup")
     if signup is None:
         raise SystemExit("generated contract has no 'signup' test")
@@ -369,86 +349,209 @@ def generate(slug: str, *, overwrite_existing: bool = False,
     for step in signup.steps:
         if getattr(step, "kind", None) == "env_secret":
             raise SystemExit(
-                f"generated contract's signup test contains an env_secret step "
-                f"(id={step.id}). That's the 'dishonest signup' anti-pattern "
-                f"(Rule A). env_secret belongs in persistence/workflow only."
+                f"generated contract's signup test contains an env_secret "
+                f"step (id={step.id}). That's the 'dishonest signup' anti-"
+                f"pattern (Rule A). env_secret belongs in persistence/"
+                f"workflow only."
             )
 
-    # Rule 5 enforcement: if a signup step references a probe_url template
-    # var, that var must be in produces AND in expected_artifacts so the
-    # agent actually fills it. Otherwise the probe step will hit a
-    # TemplateError at runtime.
+    # Rule 5: signup step URLs that reference {<slug>_probe_url} must
+    # have that var in produces AND in agent_task.expected_artifacts so
+    # the agent knows to return it.
     probe_url_refs = set()
     for step in signup.steps:
         url_template = getattr(step, "url", "") or ""
-        # Find {token} slots that look like probe URL refs
-        import re as _re
-        for m in _re.finditer(r"\{([a-zA-Z_][a-zA-Z_0-9]*_probe_url)\}", url_template):
+        for m in _re.finditer(
+            r"\{([a-zA-Z_][a-zA-Z_0-9]*_probe_url)\}", url_template
+        ):
             probe_url_refs.add(m.group(1))
     for ref in probe_url_refs:
         if ref not in signup.produces:
             raise SystemExit(
-                f"generated contract references {{{ref}}} in a signup step "
-                f"URL but didn't declare it in signup.produces. The agent "
-                f"won't know to return it. Add '{ref}' to produces and to "
-                f"agent_task.expected_artifacts."
+                f"generated contract references {{{ref}}} in a signup "
+                f"step URL but didn't declare it in signup.produces. The "
+                f"agent won't know to return it. Add '{ref}' to produces "
+                f"and to agent_task.expected_artifacts."
             )
-        if signup.agent_task and ref not in signup.agent_task.expected_artifacts:
+        if (signup.agent_task
+                and ref not in signup.agent_task.expected_artifacts):
             raise SystemExit(
                 f"generated contract has '{ref}' in produces but not in "
                 f"agent_task.expected_artifacts. The agent needs the key "
                 f"listed there so it knows to include it in the ARTIFACTS "
                 f"JSON block."
             )
-
-    # If the agent_task expects a probe_url artifact, the contract should
-    # actually USE it in a probe step; otherwise it's unused and the agent
-    # wasted effort. Warn loudly (don't reject — probe step is optional).
     if signup.agent_task:
         for art in signup.agent_task.expected_artifacts:
-            if art.endswith("_probe_url") and art not in probe_url_refs:
+            if (art.endswith("_probe_url")
+                    and art not in probe_url_refs):
                 print(f"[generate] WARNING: agent_task.expected_artifacts "
                       f"contains '{art}' but no signup step URL template "
                       f"references {{{art}}}. Probe step will not use it.")
 
-    # Rule E — reject "homepage still responds" trivia as persistence /
-    # workflow. When the service has no real API, the LLM likes to paper
-    # over the gap by writing a persistence step that just GETs the
-    # homepage and asserts 200. That turns into an F-P-P false positive:
-    # the service has NO agent surface but the registry row looks partly
-    # green. A persistence/workflow step must exercise an AUTHENTICATED
-    # endpoint — either via env_secret + auth header, or by using state
-    # produced by signup. Unauthenticated GETs of the service's landing
-    # page don't count.
+    if signup_only:
+        return
+
+    # Rule E: persistence / workflow must prove agent-specific action.
+    # Four accepted proofs (any ONE is sufficient):
+    #   1. env_secret step + at least one auth-header http step
+    #   2. `requires` from signup (implicitly used in authed step)
+    #   3. inject_nonce + content_serves_nonce round-trip
+    #   4. chained-state: later step interpolates earlier step's extract
+
     def _is_authenticated_step(step) -> bool:
         headers = getattr(step, "headers", {}) or {}
         for v in headers.values():
             low = str(v).lower()
-            if "bearer" in low or "apikey" in low or "api-key" in low or "token" in low:
+            if ("bearer" in low or "apikey" in low
+                    or "api-key" in low or "token" in low):
                 return True
         return False
+
+    def _step_interpolates_any(step, keys: set) -> bool:
+        if not keys:
+            return False
+        blob = (str(getattr(step, "url", "") or "")
+                + str(getattr(step, "headers", {}) or "")
+                + str(getattr(step, "body_json", None) or "")
+                + str(getattr(step, "body_raw", None) or "")
+                + str(getattr(step, "content_type", "") or "")
+                + str(getattr(step, "body_template", "") or ""))
+        for m in _re.finditer(r"\{([a-zA-Z_][a-zA-Z_0-9]*)\}", blob):
+            if m.group(1) in keys:
+                return True
+        return False
+
     for test_name in ("persistence", "workflow"):
         test = contract.tests.get(test_name)
         if test is None:
             continue
-        has_env_secret = any(
-            getattr(s, "kind", None) == "env_secret" for s in test.steps
-        )
-        http_steps = [s for s in test.steps if getattr(s, "kind", None) == "http"]
+        http_steps = [s for s in test.steps
+                      if getattr(s, "kind", None) == "http"]
         if not http_steps:
             continue
-        any_authed = any(_is_authenticated_step(s) for s in http_steps)
-        # If the test has no env_secret AND no auth-header on any http
-        # step AND doesn't require signup-produced state, it's trivia.
-        if not has_env_secret and not any_authed and not test.requires:
+
+        has_env_secret = any(
+            getattr(s, "kind", None) == "env_secret"
+            for s in test.steps
+        )
+        any_authed = any(
+            _is_authenticated_step(s) for s in http_steps
+        )
+        has_nonce_inject = any(
+            getattr(s, "kind", None) == "inject_nonce"
+            for s in test.steps
+        )
+        has_nonce_assertion = any(
+            getattr(a, "kind", None) == "content_serves_nonce"
+            for a in test.assertions
+        )
+        nonce_roundtrip = has_nonce_inject and has_nonce_assertion
+
+        produced_here = set()
+        for s in test.steps:
+            extracts = getattr(s, "extract", {}) or {}
+            for k in extracts:
+                produced_here.add(k)
+        chained_state = any(
+            _step_interpolates_any(s, produced_here) for s in http_steps
+        )
+
+        if (not has_env_secret and not any_authed and not test.requires
+                and not nonce_roundtrip and not chained_state):
             raise SystemExit(
-                f"generated contract's {test_name} test is 'homepage trivia' "
-                f"(Rule E). Every http step is unauthenticated with no "
-                f"env_secret and no `requires` from signup. That produces "
-                f"FPP false positives on parked / no-API services. Use "
-                f"env_secret + Authorization header, or declare a credential "
-                f"from signup in `requires`."
+                f"generated contract's {test_name} test is 'homepage "
+                f"trivia' (Rule E). No authenticated step, no env_secret, "
+                f"no `requires` from signup, no inject_nonce + "
+                f"content_serves_nonce round-trip, and no chained state "
+                f"from within-test extracts. A parked domain would pass "
+                f"this same test, so it's not real agent-action proof. "
+                f"Rewrite the {test_name} test to do one of: "
+                f"(a) env_secret + auth header; "
+                f"(b) require signup state + authed endpoint; "
+                f"(c) inject_nonce, embed it via the agent, then "
+                f"content_serves_nonce assertion on a GET that reads "
+                f"it back (here-now.json pattern); "
+                f"(d) chain http steps where a later step interpolates "
+                f"state extracted by an earlier step."
             )
+
+
+def generate(slug: str, *, overwrite_existing: bool = False,
+              model: str = "gemini-2.5-pro") -> Path:
+    if has_contract(slug) and not overwrite_existing:
+        raise SystemExit(
+            f"contract for '{slug}' already exists at "
+            f"{CONTRACTS_DIR / (slug + '.json')}. Pass --overwrite to replace.")
+
+    service = _load_service(slug)
+    docs_excerpt = _fetch_docs(service.get("docs_url"))
+    prompt = _build_prompt(service, docs_excerpt)
+
+    # Attempt loop: call LLM, parse, validate structurally, validate
+    # honesty rules. On any failure, compose a feedback prompt with the
+    # specific error and retry. MAX_ATTEMPTS total tries before giving up.
+    MAX_ATTEMPTS = 3
+    current_prompt = prompt
+    last_error: str | None = None
+
+    for attempt in range(MAX_ATTEMPTS):
+        label = "initial" if attempt == 0 else f"retry {attempt}"
+        print(f"[generate] Calling {model} for {slug} "
+              f"({label}, prompt={len(current_prompt)} chars)...")
+        output = _call_gemini(current_prompt, model=model)
+
+        raw = _extract_json(output)
+        if raw is None:
+            last_error = "LLM output did not contain a parseable ```json``` block"
+            current_prompt = (
+                f"{prompt}\n\n"
+                f"YOUR PREVIOUS RESPONSE FAILED:\n  {last_error}\n\n"
+                f"Return ONLY a single JSON object inside a ```json code block. "
+                f"No prose before or after."
+            )
+            continue
+
+        try:
+            contract = parse_contract(raw, source=f"<generate {slug} {label}>")
+        except ContractError as e:
+            last_error = f"schema validation: {e}"
+            print(f"[generate] {label} failed schema: {e}")
+            current_prompt = (
+                f"{prompt}\n\n"
+                f"YOUR PREVIOUS RESPONSE FAILED SCHEMA VALIDATION:\n  {e}\n\n"
+                f"Produce a CORRECTED JSON contract that fixes the specific "
+                f"problem above."
+            )
+            continue
+
+        try:
+            _enforce_honesty_rules(contract, signup_only=False)
+        except SystemExit as e:
+            # Our own Rules (A/D/E etc.) rejected the draft. Feed the
+            # specific rule violation back so the LLM can correct.
+            last_error = f"honesty rule: {e}"
+            print(f"[generate] {label} failed honesty rule: {e}")
+            current_prompt = (
+                f"{prompt}\n\n"
+                f"YOUR PREVIOUS RESPONSE VIOLATED AN HONESTY RULE:\n  {e}\n\n"
+                f"Produce a CORRECTED JSON contract. Pay special attention "
+                f"to the reference contracts — here-now.json in particular "
+                f"shows how to handle services that don't have authenticated "
+                f"endpoints (use inject_nonce + content_serves_nonce for "
+                f"round-trip proof instead of unauthenticated homepage GETs)."
+            )
+            continue
+
+        # All three gates passed.
+        break
+    else:
+        # Loop exhausted without break — final failure.
+        raise SystemExit(
+            f"gemini failed to produce a valid contract after "
+            f"{MAX_ATTEMPTS} attempts. Last error: {last_error}\n"
+            f"Last 1KB of output:\n{output[-1024:]}"
+        )
 
     # Contract passed structural + honesty checks. Auto-promote on the daemon
     # path (this function is also invoked by an operator from CLI, but that
