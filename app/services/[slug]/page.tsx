@@ -558,6 +558,14 @@ export default async function ServiceDetailPage({ params, searchParams }: PagePr
                   </a>
                 </div>
               )}
+              <div className="pt-3 border-t border-slate-100">
+                <Link
+                  href={`/issues?service=${service.slug}`}
+                  className="text-sm text-slate-500 hover:text-green-700 hover:underline"
+                >
+                  Report an issue with this service →
+                </Link>
+              </div>
             </div>
           </div>
         </div>

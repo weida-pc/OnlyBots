@@ -54,3 +54,13 @@ export interface ServiceWithVerification extends Service {
     results: VerificationResult[];
   } | null;
 }
+
+export interface Issue {
+  id: number;
+  service_slug: string | null;
+  title: string;
+  body: string;
+  reporter_contact: string | null;
+  status: "open" | "acknowledged" | "closed";
+  created_at: string;
+}

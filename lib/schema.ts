@@ -31,6 +31,34 @@ export const submitServiceSchema = z.object({
 
 export type SubmitServiceInput = z.infer<typeof submitServiceSchema>;
 
+/**
+ * Issue submission schema. Title + body are required. service_slug is
+ * optional — when present, the issue is filed against that service;
+ * otherwise it's a general site/registry issue. reporter_contact is a
+ * free-form string (email or @handle) so people can leave a way to be
+ * reached without us doing real email validation.
+ */
+export const submitIssueSchema = z.object({
+  title: z.string().trim().min(5).max(200),
+  body: z.string().trim().min(10).max(5000),
+  service_slug: z
+    .string()
+    .trim()
+    .max(150)
+    .optional()
+    .or(z.literal(""))
+    .transform((v) => (v ? v : undefined)),
+  reporter_contact: z
+    .string()
+    .trim()
+    .max(200)
+    .optional()
+    .or(z.literal(""))
+    .transform((v) => (v ? v : undefined)),
+});
+
+export type SubmitIssueInput = z.infer<typeof submitIssueSchema>;
+
 export function getJsonSchema() {
   return {
     $schema: "http://json-schema.org/draft-07/schema#",

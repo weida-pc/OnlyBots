@@ -62,3 +62,39 @@ CREATE TABLE IF NOT EXISTS twilio_inbound_sms (
 );
 CREATE INDEX IF NOT EXISTS idx_twilio_sms_to_received
   ON twilio_inbound_sms (to_number, received_at DESC);
+
+-- Public issue tracker. Anyone (human or agent) can file an issue against
+-- the registry as a whole or against a specific service. Issues are
+-- intentionally low-ceremony — title + body, optional contact, optional
+-- service slug. No auth, rate-limited per IP at the API layer.
+CREATE TABLE IF NOT EXISTS issues (
+  id SERIAL PRIMARY KEY,
+  -- NULL = general/site-level issue. When set, must match an existing
+  -- services.slug, but we don't enforce FK to keep deletes simple and to
+  -- allow referencing un-canonicalised slugs from the form.
+  service_slug VARCHAR(150),
+  title VARCHAR(200) NOT NULL,
+  body TEXT NOT NULL,
+  -- Optional email or @handle. We don't validate beyond "looks plausible"
+  -- — the registry doesn't email people, this is just so reporters can
+  -- leave a way to be contacted.
+  reporter_contact VARCHAR(200),
+  status VARCHAR(20) NOT NULL DEFAULT 'open',  -- open | acknowledged | closed
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_issues_service_slug
+  ON issues (service_slug);
+CREATE INDEX IF NOT EXISTS idx_issues_created_at
+  ON issues (created_at DESC);
+
+-- Grant the app role read/write on the issues table. Idempotent — re-running
+-- is a no-op. Wrapped in a DO block so a fresh DB without an `onlybots` role
+-- (e.g. a contributor's local instance) doesn't fail the migration.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'onlybots') THEN
+    GRANT SELECT, INSERT, UPDATE, DELETE ON issues TO onlybots;
+    GRANT USAGE, SELECT ON SEQUENCE issues_id_seq TO onlybots;
+  END IF;
+END
+$$;

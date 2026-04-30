@@ -1,6 +1,11 @@
 import { Pool } from "pg";
 import { slugify } from "./utils";
-import type { Service, ServiceWithVerification, VerificationRun } from "./types";
+import type {
+  Issue,
+  Service,
+  ServiceWithVerification,
+  VerificationRun,
+} from "./types";
 
 // Pool is only initialised when DATABASE_URL is available so the app doesn't
 // crash at build time or in environments without a database.
@@ -281,6 +286,72 @@ export async function updateServiceStatus(
      WHERE id = $4`,
     [status, failedAtStep, verifiedDate, serviceId]
   );
+}
+
+// ---------------------------------------------------------------------------
+// Issues — public, low-ceremony bug/feedback tracker
+// ---------------------------------------------------------------------------
+
+export async function createIssue(data: {
+  title: string;
+  body: string;
+  service_slug?: string;
+  reporter_contact?: string;
+}): Promise<Issue> {
+  const p = getPool();
+  if (!p) throw new Error("DATABASE_URL is not configured");
+
+  const result = await p.query(
+    `INSERT INTO issues (service_slug, title, body, reporter_contact)
+     VALUES ($1, $2, $3, $4)
+     RETURNING *`,
+    [
+      data.service_slug ?? null,
+      data.title,
+      data.body,
+      data.reporter_contact ?? null,
+    ]
+  );
+  return result.rows[0] as Issue;
+}
+
+export async function getIssues(filters?: {
+  service_slug?: string;
+  limit?: number;
+}): Promise<Issue[]> {
+  const p = getPool();
+  if (!p) return [];
+
+  const limit = Math.min(Math.max(filters?.limit ?? 100, 1), 500);
+
+  if (filters?.service_slug) {
+    const result = await p.query(
+      `SELECT * FROM issues
+       WHERE service_slug = $1
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [filters.service_slug, limit]
+    );
+    return result.rows as Issue[];
+  }
+
+  const result = await p.query(
+    `SELECT * FROM issues
+     ORDER BY created_at DESC
+     LIMIT $1`,
+    [limit]
+  );
+  return result.rows as Issue[];
+}
+
+export async function serviceSlugExists(slug: string): Promise<boolean> {
+  const p = getPool();
+  if (!p) return false;
+  const result = await p.query(
+    "SELECT 1 FROM services WHERE slug = $1 LIMIT 1",
+    [slug]
+  );
+  return result.rows.length > 0;
 }
 
 export async function checkDuplicateUrl(url: string): Promise<boolean> {

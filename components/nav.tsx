@@ -3,6 +3,7 @@ import Link from "next/link";
 const navLinks = [
   { label: "Registry", href: "/" },
   { label: "Submit", href: "/submit" },
+  { label: "Issues", href: "/issues" },
   { label: "Methodology", href: "/methodology" },
   { label: "API Docs", href: "/api-docs" },
 ];
